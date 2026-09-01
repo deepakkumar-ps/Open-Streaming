@@ -1,0 +1,164 @@
+# =============================================================================
+#  KAFKA STACK — multi-listener, security test rig
+#  Runs ONLY on the node labelled  role=kafka
+#
+#    docker stack deploy -c docker-compose.kafka-secure.yml kafka
+#
+#  DROP-IN REPLACEMENT for docker-compose.kafka.yml. The existing PLAINTEXT
+#  listeners (9092 in-swarm, 9094 host) are UNCHANGED, so Bridge Service, VPS,
+#  Gateway and kafka-ui keep working exactly as they do today. Five additional
+#  secured listeners are added alongside, one per test scenario. Nothing is
+#  taken away until you choose to remove it.
+#
+#  PREREQUISITE — stage the certs on the Kafka node first:
+#    ./generate-certs.sh                       (creates ./secrets)
+#    scp -r secrets ocsautotest@<kafka-node>:/home/ocsautotest/docker-composes/Kafka/
+#    ssh ocsautotest@<kafka-node> 'sudo chown -R 1000:1000 /home/ocsautotest/docker-composes/Kafka/secrets'
+#
+#  Broker config below was verified end-to-end on single-node Docker
+#  (all 7 listeners bound, SASL_SSL create/list topic succeeded).
+# =============================================================================
+
+networks:
+  shared_network:
+    external: true
+
+services:
+  kafka:
+    image: apache/kafka:latest
+    hostname: kafka
+    networks:
+      - shared_network
+    ports:
+      # Existing external access. The five new listeners are in-swarm only
+      # (kafka:9095-9099) — every client that needs them already runs on the
+      # overlay network, so no new host ports or firewall rules are required.
+      - "9094:9094"
+    environment:
+      CLUSTER_ID: "local"
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: "broker,controller"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
+
+      # --- Listeners -----------------------------------------------------------
+      # 9092 PLAINTEXT       EXISTING — production path + inter-broker. Untouched.
+      # 9093 CONTROLLER      EXISTING — KRaft controller, internal.
+      # 9094 PLAINTEXT_HOST  EXISTING — external plaintext. Untouched.
+      # 9095 SASLPLAIN       scenario 1: SASL/PLAIN, no TLS
+      # 9096 SASLSSL         scenario 2: SASL/PLAIN over TLS, no client cert
+      # 9097 MTLS            scenario 3: TLS + mandatory client cert, no SASL
+      # 9098 SASLMTLS        scenario 4: SASL/PLAIN over TLS + mandatory client cert
+      # 9099 SCRAMMTLS       scenario 5: SASL/SCRAM-SHA-256 over TLS + client cert
+      #
+      # New listener names contain NO underscores on purpose. Per-listener config
+      # arrives as KAFKA_LISTENER_NAME_<NAME>_... env vars where "_" becomes ".",
+      # so an underscore in the name would corrupt the property key. (The existing
+      # PLAINTEXT_HOST name is fine — it needs no per-listener overrides.)
+      KAFKA_LISTENERS: "PLAINTEXT://:9092,CONTROLLER://:9093,PLAINTEXT_HOST://:9094,SASLPLAIN://:9095,SASLSSL://:9096,MTLS://:9097,SASLMTLS://:9098,SCRAMMTLS://:9099"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka:9092,PLAINTEXT_HOST://10.104.10.89:9094,SASLPLAIN://kafka:9095,SASLSSL://kafka:9096,MTLS://kafka:9097,SASLMTLS://kafka:9098,SCRAMMTLS://kafka:9099"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT,SASLPLAIN:SASL_PLAINTEXT,SASLSSL:SASL_SSL,MTLS:SSL,SASLMTLS:SASL_SSL,SCRAMMTLS:SASL_SSL"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+
+      # --- SASL mechanisms enabled cluster-wide --------------------------------
+      KAFKA_SASL_ENABLED_MECHANISMS: "PLAIN,SCRAM-SHA-256"
+
+      # --- TLS keystore --------------------------------------------------------
+      # MUST use the image's FILENAME/CREDENTIALS indirection. /etc/kafka/docker/configure
+      # detects "SSL://" in KAFKA_ADVERTISED_LISTENERS and hard-requires these three
+      # vars; it runs under `set -u`, so using KAFKA_SSL_KEYSTORE_LOCATION instead
+      # kills the container at startup with:
+      #   /etc/kafka/docker/configure: line 18: !1: unbound variable
+      KAFKA_SSL_KEYSTORE_FILENAME: "kafka.keystore.p12"
+      KAFKA_SSL_KEYSTORE_CREDENTIALS: "kafka_keystore_creds"
+      KAFKA_SSL_KEY_CREDENTIALS: "kafka_key_creds"
+      KAFKA_SSL_KEYSTORE_TYPE: "PKCS12"
+
+      # --- TLS truststore ------------------------------------------------------
+      # Set DIRECTLY, unlike the keystore. The same script only wires up truststore
+      # indirection when the *global* ssl.client.auth is required/requested; ours is
+      # "none" because client certs are demanded per-listener. Without these the
+      # mTLS listeners have no CA to validate client certificates against.
+      KAFKA_SSL_TRUSTSTORE_LOCATION: "/etc/kafka/secrets/kafka.truststore.p12"
+      KAFKA_SSL_TRUSTSTORE_PASSWORD: "changeit"
+      KAFKA_SSL_TRUSTSTORE_TYPE: "PKCS12"
+      KAFKA_SSL_CLIENT_AUTH: "none"
+
+      # --- JAAS ----------------------------------------------------------------
+      # PLAIN listeners are configured inline below — no file dependency.
+      # The SCRAM listener needs a JAAS *entry* to exist even though its
+      # credentials live in cluster metadata; secrets/kafka_server_jaas.conf
+      # supplies scrammtls.KafkaServer. Without it the broker exits with
+      #   Could not find a 'KafkaServer' or 'scrammtls.KafkaServer' entry
+      KAFKA_OPTS: "-Djava.security.auth.login.config=/etc/kafka/secrets/kafka_server_jaas.conf"
+
+      # --- Per-listener SASL mechanism ----------------------------------------
+      KAFKA_LISTENER_NAME_SASLPLAIN_SASL_ENABLED_MECHANISMS: "PLAIN"
+      KAFKA_LISTENER_NAME_SASLSSL_SASL_ENABLED_MECHANISMS: "PLAIN"
+      KAFKA_LISTENER_NAME_SASLMTLS_SASL_ENABLED_MECHANISMS: "PLAIN"
+      KAFKA_LISTENER_NAME_SCRAMMTLS_SASL_ENABLED_MECHANISMS: "SCRAM-SHA-256"
+
+      # --- Per-listener JAAS for the PLAIN listeners ---------------------------
+      KAFKA_LISTENER_NAME_SASLPLAIN_PLAIN_SASL_JAAS_CONFIG: 'org.apache.kafka.common.security.plain.PlainLoginModule required username="admin" password="admin-secret" user_admin="admin-secret" user_streamuser="stream-secret";'
+      KAFKA_LISTENER_NAME_SASLSSL_PLAIN_SASL_JAAS_CONFIG: 'org.apache.kafka.common.security.plain.PlainLoginModule required username="admin" password="admin-secret" user_admin="admin-secret" user_streamuser="stream-secret";'
+      KAFKA_LISTENER_NAME_SASLMTLS_PLAIN_SASL_JAAS_CONFIG: 'org.apache.kafka.common.security.plain.PlainLoginModule required username="admin" password="admin-secret" user_admin="admin-secret" user_streamuser="stream-secret";'
+
+      # --- Per-listener client-certificate requirement (mTLS) -----------------
+      KAFKA_LISTENER_NAME_MTLS_SSL_CLIENT_AUTH: "required"
+      KAFKA_LISTENER_NAME_SASLMTLS_SSL_CLIENT_AUTH: "required"
+      KAFKA_LISTENER_NAME_SCRAMMTLS_SSL_CLIENT_AUTH: "required"
+
+      # --- Single-node sizing (unchanged from your existing stack) -------------
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_LOG_DIRS: "/tmp/kraft-kafka-logs"
+    volumes:
+      # Existing data dir. Must be owned by uid 1000 on the Kafka node.
+      - /home/ocsautotest/docker-composes/Kafka/data:/tmp/kraft-kafka-logs
+      # NEW — certs/JAAS. Stage on the Kafka node and chown to 1000:1000.
+      # Swarm does NOT copy local files to remote nodes, so a relative
+      # ./secrets mount would silently produce an empty directory here.
+      - /home/ocsautotest/docker-composes/Kafka/secrets:/etc/kafka/secrets:ro
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.labels.role == kafka
+      restart_policy:
+        condition: on-failure
+
+  kafka-ui:
+    image: ghcr.io/kafbat/kafka-ui:latest
+    networks:
+      - shared_network
+    ports:
+      - "8080:8080"
+    environment:
+      # Cluster 0 stays on PLAINTEXT so the UI keeps working regardless of the
+      # state of the secured listeners — your always-available view of the broker.
+      KAFKA_CLUSTERS_0_NAME: "local-plaintext"
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: "kafka:9092"
+
+      # Cluster 1 exercises the SASL_SSL listener, giving you a browser-based
+      # check that scenario 2 works without touching any application service.
+      KAFKA_CLUSTERS_1_NAME: "local-saslssl"
+      KAFKA_CLUSTERS_1_BOOTSTRAPSERVERS: "kafka:9096"
+      KAFKA_CLUSTERS_1_PROPERTIES_SECURITY_PROTOCOL: SASL_SSL
+      KAFKA_CLUSTERS_1_PROPERTIES_SASL_MECHANISM: PLAIN
+      KAFKA_CLUSTERS_1_PROPERTIES_SASL_JAAS_CONFIG: 'org.apache.kafka.common.security.plain.PlainLoginModule required username="admin" password="admin-secret";'
+      KAFKA_CLUSTERS_1_PROPERTIES_SSL_TRUSTSTORE_LOCATION: /etc/kafka/secrets/kafka.truststore.p12
+      KAFKA_CLUSTERS_1_PROPERTIES_SSL_TRUSTSTORE_TYPE: PKCS12
+      KAFKA_CLUSTERS_1_PROPERTIES_SSL_TRUSTSTORE_PASSWORD: changeit
+
+      DYNAMIC_CONFIG_ENABLED: "true"
+    volumes:
+      - /home/ocsautotest/docker-composes/Kafka/secrets:/etc/kafka/secrets:ro
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.labels.role == kafka
+      restart_policy:
+        condition: on-failure

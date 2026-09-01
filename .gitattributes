@@ -1,0 +1,18 @@
+# Shell scripts and Linux-side config MUST keep LF endings.
+# A .sh file checked out with CRLF fails on Linux with:
+#   bad interpreter: /usr/bin/env bash^M: no such file or directory
+# These run on the Swarm nodes, so this is not cosmetic.
+*.sh            text eol=lf
+*.conf          text eol=lf
+*.properties    text eol=lf
+*.yml           text eol=lf
+*.yaml          text eol=lf
+
+# PowerShell is Windows-side; CRLF is fine and conventional.
+*.ps1           text eol=crlf
+
+# Never let Git mangle binary keystores.
+*.p12           binary
+*.jks           binary
+*.crt           binary
+*.key           binary

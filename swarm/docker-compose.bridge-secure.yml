@@ -1,0 +1,202 @@
+# =============================================================================
+#  BRIDGE STACK — with Kafka security enabled
+#  Runs ONLY on the node labelled  role=bridge
+#
+#    docker stack deploy -c docker-compose.bridge-secure.yml bridge
+#
+#  Identical to your existing bridge stack except:
+#    1. The THREE Kafka clients (bridge-service, virtual-parameter-service,
+#       gateway-service) point at a secured listener and carry a Security block.
+#    2. Those three mount the CA certificate.
+#
+#  Currently configured for  SCENARIO 2: SASL_SSL + PLAIN, no client cert
+#  (kafka:9096). To switch scenario, change BrokerUrl + the Security__* block —
+#  see the table in SWARM_SETUP_GUIDE.md §5. Services that don't talk to Kafka
+#  (mongodb, file-indexer, config-indexer) are unchanged.
+#
+#  >>> BEFORE DEPLOYING <<<
+#  a) Stage the CA cert on the BRIDGE node:
+#       scp -r secrets ocsautotest@<bridge-node>:/home/ocsautotest/docker-composes/Bridge/
+#  b) Restore your real CIFS credentials in the t_drive volume at the bottom —
+#     they are placeholdered here so this file is safe to share/commit.
+# =============================================================================
+
+networks:
+  shared_network:
+    external: true
+
+services:
+
+  bridge-service:
+    image: atlasplatformdocker/bridge-service-host-dev:2.1.5.3
+    networks:
+      - shared_network
+    deploy:
+      placement:
+        constraints:
+          - node.labels.role == bridge
+    ports:
+      - "9697:9697"
+      - "10010:10010"
+    environment:
+      TZ: Europe/London
+
+      StreamApiConfig__StreamCreationStrategy: 2
+      StreamApiConfig__Domain: "VitualTest"
+
+      # ---- KAFKA SECURITY -----------------------------------------------------
+      # Scenario 2: SASL_SSL + PLAIN, broker-verification-only TLS.
+      StreamApiConfig__BrokerUrl: "kafka:9096"
+      StreamApiConfig__Security__Protocol: "SaslSsl"
+      StreamApiConfig__Security__Mechanism: "Plain"
+      StreamApiConfig__Security__SaslUsername: "streamuser"
+      StreamApiConfig__Security__SaslPassword: "stream-secret"
+      StreamApiConfig__Security__SslCaLocation: "/etc/kafka/secrets/ca.crt"
+      # -------------------------------------------------------------------------
+
+      BridgeConfig__DataSource: "Default"
+      BridgeConfig__LiveConcurrencyFactor: 1
+      BridgeConfig__OffloadConcurrencyFactor: 1
+      BridgeConfig__OffloadProcessing: "false"
+
+      DOTNET_GCHeapHardLimit: "0x60000000"
+
+      RdaConfig__PulFilesSearchPaths__0: "/tdrive/PUL Files"
+      EssentialsConfig__CfgDirectoryPaths__0: "/tdrive/Config"
+      EssentialsConfig__PgvDirectoryPaths__0: "/tdrive/PGVs"
+      EssentialsConfig__RemoteConfigIndexerUrl: "http://config-indexer-service:5050"
+    volumes:
+      - t_drive:/tdrive
+      - /home/ocsautotest/docker-composes/Bridge/secrets:/etc/kafka/secrets:ro
+
+  virtual-parameter-service:
+    image: atlasplatformdocker/virtual-parameter-service-host-dev:2.1.3.3
+    networks:
+      - shared_network
+    deploy:
+      placement:
+        constraints:
+          - node.labels.role == bridge
+    ports:
+      - "10011:10010"
+    environment:
+      StreamApiConfig__StreamCreationStrategy: 2
+      VirtualParameterServiceConfig__DataSource: "Default"
+
+      SessionTypesToProcess__0: "Session"
+      SessionTypesToProcess__1: "VTS"
+
+      # ---- KAFKA SECURITY -----------------------------------------------------
+      # NOTE: this service previously had Protocol: "PLAINTEXT" (upper case).
+      # The documented value is "SaslSsl"/"Plaintext" style — matching the docs'
+      # casing here removes any doubt about enum parsing.
+      StreamApiConfig__BrokerUrl: "kafka:9096"
+      StreamApiConfig__Security__Protocol: "SaslSsl"
+      StreamApiConfig__Security__Mechanism: "Plain"
+      StreamApiConfig__Security__SaslUsername: "streamuser"
+      StreamApiConfig__Security__SaslPassword: "stream-secret"
+      StreamApiConfig__Security__SslCaLocation: "/etc/kafka/secrets/ca.crt"
+      # -------------------------------------------------------------------------
+    volumes:
+      - /home/ocsautotest/docker-composes/Bridge/secrets:/etc/kafka/secrets:ro
+
+  gateway-service:
+    image: atlasplatformdocker/gateway-service-host-dev:0.0.0.58-ci
+    networks:
+      - shared_network
+    deploy:
+      placement:
+        constraints:
+          - node.labels.role == bridge
+    ports:
+      - "5200:5200"
+    environment:
+      StreamApiConfig__StreamCreationStrategy: 2
+      Kestrel__Endpoints__Grpc__Url: "http://+:5200"
+
+      # ---- KAFKA SECURITY -----------------------------------------------------
+      StreamApiConfig__BrokerUrl: "kafka:9096"
+      StreamApiConfig__Security__Protocol: "SaslSsl"
+      StreamApiConfig__Security__Mechanism: "Plain"
+      StreamApiConfig__Security__SaslUsername: "streamuser"
+      StreamApiConfig__Security__SaslPassword: "stream-secret"
+      StreamApiConfig__Security__SslCaLocation: "/etc/kafka/secrets/ca.crt"
+      # -------------------------------------------------------------------------
+    volumes:
+      - /home/ocsautotest/docker-composes/Bridge/secrets:/etc/kafka/secrets:ro
+
+  # ---------------------------------------------------------------------------
+  # Below: no Kafka connection, unchanged from your existing stack.
+  # ---------------------------------------------------------------------------
+
+  mongodb:
+    image: mongodb/mongodb-community-server:latest
+    networks:
+      - shared_network
+    deploy:
+      placement:
+        constraints:
+          - node.labels.role == bridge
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_db_data:/data/db
+
+  file-indexer-service:
+    image: atlasplatformdocker/file-indexing-service-dev:2.1.2.5
+    networks:
+      - shared_network
+    deploy:
+      placement:
+        constraints:
+          - node.labels.role == bridge
+    ports:
+      - "5000:5000"
+    volumes:
+      - t_drive:/tdrive
+    environment:
+      MongoDb__ConnectionString: "mongodb://mongodb:27017"
+      MongoDb__DataBaseName: "FileIndexDB"
+      MongoDb__CollectionName: "IndexedFiles"
+      ASPNETCORE_URLS: "http://*:5000"
+      StorageType: "MongoDb"
+      Directories__0: "/tdrive/PGVs"
+      Directories__1: "/tdrive/Config"
+      Directories__2: "/tdrive/PUL Files"
+      Directories__3: "/tdrive/DK/Logcfgs"
+      Directories__4: "/tdrive/DK/pgv"
+      Extensions__0: ".pgv"
+      Extensions__1: ".cfg"
+      Extensions__2: ".pul"
+
+  config-indexer-service:
+    image: atlasplatformdocker/config-indexing-service-dev:2.1.2.5
+    networks:
+      - shared_network
+    deploy:
+      placement:
+        constraints:
+          - node.labels.role == bridge
+    ports:
+      - "5050:5050"
+    volumes:
+      - t_drive:/tdrive
+    environment:
+      MongoDb__ConnectionString: "mongodb://mongodb:27017"
+      StorageType: "MongoDb"
+      FileIndexerEndpoints__CfgEndpoint: "http://file-indexer-service:5000"
+      FileIndexerEndpoints__PgvEndpoint: "http://file-indexer-service:5000"
+      ASPNETCORE_URLS: "http://*:5050"
+
+volumes:
+  t_drive:
+    driver: local
+    driver_opts:
+      type: cifs
+      # >>> REPLACE with your real credentials from the current bridge stack. <<<
+      # Placeholdered so this file is safe to share and commit. Better still,
+      # move these to a docker secret while you're securing things.
+      o: "username=REPLACE_ME,password=REPLACE_ME,vers=3.0"
+      device: "//vmmcafilappp01.applied.com/Files"
+
+  mongo_db_data:

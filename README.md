@@ -4,11 +4,37 @@ This repository includes comprehensive setup configurations for Kafka with vario
 
 ## Table of Contents
 
+- [Which setup do I want?](#which-setup-do-i-want)
 - [Quick Start](#quick-start)
 - [Available Security Configurations](#available-security-configurations)
 - [Setup Guides](#setup-guides)
+- [Docker Swarm deployment](#docker-swarm-deployment)
 - [Directory Structure](#directory-structure)
 - [Common Prerequisites](#common-prerequisites)
+
+---
+
+## Which setup do I want?
+
+There are two deployment modes in this repo. They test the same five security
+postures but are built for different environments — pick one before reading on.
+
+| | `test/` — single-node Compose | `swarm/` — multi-node Swarm |
+|---|---|---|
+| **Runs on** | One machine, `docker compose` | Docker Swarm, nodes labelled `role=kafka` / `role=bridge` |
+| **Shape** | Five separate stacks, one per scenario | **One** stack exposing all five postures on different ports |
+| **Switching scenario** | Tear down, bring up the next | Change the client's port + `Security` block |
+| **Existing plaintext broker** | Replaced | **Left running untouched** |
+| **Best for** | Learning a posture in isolation; quick local experiments | Testing against the real deployment without downtime |
+
+If you are validating the **Stream API / Bridge Service security feature against
+the real cluster**, go to **[`swarm/`](swarm/SWARM_SETUP_GUIDE.md)**.
+
+> **Swarm users — three things in `test/` do not carry over.** `docker stack deploy`
+> ignores `container_name` and `depends_on`; relative bind mounts such as
+> `./secrets` are not copied to remote nodes; and the SCRAM scenario's
+> `kafka-init` bootstrap depends on `depends_on` ordering, so it cannot work as
+> written under Swarm. The `swarm/` stack solves all three.
 
 ---
 
@@ -20,6 +46,8 @@ Each security configuration is located in its own directory under the `test/` fo
 2. Follow the specific setup guide for that configuration
 3. Use `docker compose up -d` to start the stack
 4. Access Kafka UI at `http://localhost:8080`
+
+For the Swarm deployment instead, see [`swarm/SWARM_SETUP_GUIDE.md`](swarm/SWARM_SETUP_GUIDE.md).
 
 ---
 
@@ -572,6 +600,14 @@ kafka-storage.sh format --cluster-id local --config /tmp/format.properties \
 
 The `kafka-init` service shares the `kafka-scram-data` volume with the `kafka` service, so when the broker's own startup formatting runs, it finds storage already formatted and skips re-formatting. The `kafka` service is set to `depends_on: kafka-init: condition: service_completed_successfully`, ensuring initialization always runs first.
 
+> **This approach is Compose-only — it cannot work under Docker Swarm.**
+> `docker stack deploy` ignores `depends_on`, so the ordering guarantee
+> disappears, and the shared named volume would additionally require both
+> containers pinned to the same node. The [`swarm/`](swarm/) stack avoids the
+> problem entirely by keeping a PLAINTEXT listener available, which leaves an
+> unauthenticated path in to create the first SCRAM user with a plain
+> `kafka-configs.sh` call — see `swarm/create-scram-users.sh`.
+
 ### Start the Stack
 
 ```bash
@@ -662,6 +698,75 @@ If you modify `format.properties` or `docker-compose.yml`, be aware:
 1. **Complete listener setup required**: `kafka-storage.sh format` builds a full broker config internally to validate before writing metadata, so `format.properties` needs the complete listener setup (`controller.listener.names`, `listeners`, `listener.security.protocol.map`, `inter.broker.listener.name`).
 
 2. **Volume ownership**: The named volume's log directory doesn't pre-exist in the image, so Docker creates it root-owned on first mount. `kafka-init` runs as root (`user: "0:0"`) and `chown`s the directory to uid 1000 afterward, so the `kafka` service (which runs as the image's default non-root `appuser`) can still write to it.
+
+---
+
+## Docker Swarm deployment
+
+**Location**: [`swarm/`](swarm/) — full walkthrough in
+[`swarm/SWARM_SETUP_GUIDE.md`](swarm/SWARM_SETUP_GUIDE.md).
+
+For the two-node Swarm (Kafka on `role=kafka`, application services on
+`role=bridge`), a single Kafka stack exposes **every** security posture at once,
+each on its own port. Deploy the broker once; switch scenario by changing only
+the client configuration.
+
+### Port map
+
+| Port | Listener | Protocol | Mechanism | Client cert | Scenario |
+|---|---|---|---|---|---|
+| 9092 | `PLAINTEXT` | PLAINTEXT | — | — | **existing / production + inter-broker** |
+| 9093 | `CONTROLLER` | PLAINTEXT | — | — | KRaft internal |
+| 9094 | `PLAINTEXT_HOST` | PLAINTEXT | — | — | **existing** external |
+| 9095 | `SASLPLAIN` | SASL_PLAINTEXT | PLAIN | no | 1 |
+| 9096 | `SASLSSL` | SASL_SSL | PLAIN | no | **2 — start here** |
+| 9097 | `MTLS` | SSL | — | required | 3 |
+| 9098 | `SASLMTLS` | SASL_SSL | PLAIN | required | 4 |
+| 9099 | `SCRAMMTLS` | SASL_SSL | SCRAM-SHA-256 | required | 5 |
+
+Ports 9092/9093/9094 are byte-for-byte unchanged from the existing production
+stack, so Bridge Service, VPS, Gateway and kafka-ui keep working throughout.
+Ports 9095–9099 are in-swarm only — no new host ports or firewall rules.
+
+### Files
+
+| File | Purpose |
+|---|---|
+| `docker-compose.kafka-secure.yml` | Kafka stack, all listeners. Drop-in for the existing Kafka stack. |
+| `docker-compose.bridge-secure.yml` | Bridge stack — all three Kafka clients with a `Security` block. |
+| `generate-certs.sh` / `.ps1` | CA, broker keystore/truststore, client certs. SAN includes the Kafka node IP. |
+| `create-scram-users.sh` | SCRAM credentials (scenario 5 only). |
+| `kafka_server_jaas.conf` | Broker JAAS entry required by the SCRAM listener. |
+| `docker-compose.local-preflight.yml` | Same broker config for plain `docker compose` on a laptop. |
+
+### Three clients, not one
+
+`bridge-service`, `virtual-parameter-service` **and** `gateway-service` all
+connect to Kafka. Securing the broker and updating only the Bridge Service
+breaks the other two. All three are configured in
+`docker-compose.bridge-secure.yml`.
+
+Environment-variable form maps 1:1 onto the JSON, double underscore per level:
+
+```yaml
+StreamApiConfig__BrokerUrl: "kafka:9096"
+StreamApiConfig__Security__Protocol: "SaslSsl"
+StreamApiConfig__Security__Mechanism: "Plain"
+StreamApiConfig__Security__SaslUsername: "streamuser"
+StreamApiConfig__Security__SaslPassword: "stream-secret"
+StreamApiConfig__Security__SslCaLocation: "/etc/kafka/secrets/ca.crt"
+```
+
+### Verification status
+
+The broker configuration in `docker-compose.kafka-secure.yml` was validated
+end-to-end on single-node Docker before being committed: all seven listeners
+bound, `Kafka Server started` clean, SCRAM users created over the plaintext
+listener, and a SASL_SSL create-topic/list round-trip succeeded. Two defects
+were found and fixed during that check — both documented under
+[Troubleshooting](#troubleshooting).
+
+Not yet run on the Swarm itself.
 
 ---
 
@@ -804,7 +909,16 @@ Open-Streaming/
 ├── Local-Bridge/
 │   ├── README.md
 │   └── docker-compose-local-machine.yaml
-└── test/
+├── swarm/                              <-- Docker Swarm, multi-node
+│   ├── SWARM_SETUP_GUIDE.md
+│   ├── docker-compose.kafka-secure.yml     (all 5 postures, one stack)
+│   ├── docker-compose.bridge-secure.yml    (3 Kafka clients + Security)
+│   ├── docker-compose.local-preflight.yml  (same broker, plain compose)
+│   ├── generate-certs.sh / .ps1
+│   ├── create-scram-users.sh
+│   ├── kafka_server_jaas.conf
+│   └── .gitignore                          (secrets/ never committed)
+└── test/                               <-- single-node Compose
     ├── bridge service sample config/
     │   └── MSOConfigs_P/
     │       ├── AppConfig.json
@@ -872,6 +986,53 @@ powershell -ExecutionPolicy Bypass -File .\generate-certs.ps1
 ```
 
 Alternatively, use Git Bash or WSL.
+
+**If instead the very first openssl command fails with something like:**
+```
+Can't open Z:/extlib/_5034__/ssl/openssl.cnf for reading, Invalid argument
+```
+the machine has more than one `openssl.exe` and PowerShell is picking the wrong
+one — typically Strawberry Perl's, which is resolved ahead of Git's and looks
+for a config file at a path baked in when it was compiled. Confirm with:
+
+```powershell
+Get-Command openssl -All
+```
+
+Fix by pointing at Git's config in the same session before running the script:
+
+```powershell
+$env:OPENSSL_CONF = "C:\Program Files\Git\mingw64\etc\ssl\openssl.cnf"
+```
+
+### Issue (Swarm): broker exits with `configure: line 18: !1: unbound variable`
+
+The `apache/kafka` image's `/etc/kafka/docker/configure` detects `SSL://` in
+`KAFKA_ADVERTISED_LISTENERS` and then hard-requires
+`KAFKA_SSL_KEYSTORE_FILENAME`, `KAFKA_SSL_KEYSTORE_CREDENTIALS` and
+`KAFKA_SSL_KEY_CREDENTIALS`. It runs under `set -u`, so supplying
+`KAFKA_SSL_KEYSTORE_LOCATION` instead kills the container before Kafka starts.
+
+Rule: **keystore must use the FILENAME/CREDENTIALS indirection; truststore must
+be set directly** via `KAFKA_SSL_TRUSTSTORE_LOCATION`/`_PASSWORD`/`_TYPE` — the
+same script only wires up truststore indirection when the *global*
+`ssl.client.auth` is `required`/`requested`. Already handled in
+`swarm/docker-compose.kafka-secure.yml`.
+
+### Issue (Swarm): broker exits with `Could not find a 'KafkaServer' entry`
+
+Full message: `Could not find a 'KafkaServer' or 'scrammtls.KafkaServer' entry
+in the JAAS configuration.` Kafka requires a JAAS *entry* to exist for a
+SCRAM-enabled listener even though the credentials themselves live in cluster
+metadata. Supplied by `swarm/kafka_server_jaas.conf` plus the `KAFKA_OPTS` line
+in the stack file — make sure that file was included when copying `secrets/`
+to the Kafka node (`generate-certs.sh` copies it in automatically).
+
+### Issue (Swarm): `secrets` directory empty inside the container
+
+Swarm does not copy local files to remote nodes, so a relative `./secrets` bind
+mount silently yields an empty directory. Stage the folder at an absolute path
+**on the target node** and ensure it is owned by uid 1000 on the Kafka node.
 
 ### Issue: Port already in use
 
