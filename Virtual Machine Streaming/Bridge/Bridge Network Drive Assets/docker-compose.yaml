@@ -1,0 +1,222 @@
+services:
+  kafka:
+    image: apache/kafka:latest
+    hostname: kafka 
+    networks:
+      - stream_net
+    ports:
+      - "9094:9094"
+    deploy:
+      placement:
+        constraints:
+          - node.labels.role == kafka
+    environment:
+      CLUSTER_ID: 'dev-kafka-cluster' 
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: 'broker,controller'
+      KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka:9093' 
+      KAFKA_LISTENERS: 'PLAINTEXT://:9092,CONTROLLER://:9093,PLAINTEXT_HOST://:9094'
+      KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://kafka:9092,PLAINTEXT_HOST://10.102.40.37:9094'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT'
+ 
+      KAFKA_INTER_BROKER_LISTENER_NAME: 'PLAINTEXT'
+      KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
+ 
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0 
+
+      KAFKA_LOG_RETENTION_HOURS: 10 
+ 
+      KAFKA_LOG_DIRS: '/tmp/kraft-kafka-logs' 
+ 
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest 
+    networks:
+      - stream_net
+    ports:
+      - "8080:8080" 
+    deploy:
+      placement:
+        constraints:
+          - node.labels.role == kafka
+    environment:
+      KAFKA_CLUSTERS_0_NAME: 'dev-kafka-cluster'
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: 'kafka:9092'
+      DYNAMIC_CONFIG_ENABLED: 'true' 
+    depends_on:
+      - kafka 
+
+  bridge-service:
+    image: atlasplatformdocker/bridge-service-host-dev:2.1.5.3
+    privileged: true 
+    networks:
+      - stream_net
+    deploy:
+      placement:
+        constraints:
+          - node.labels.role == bridge-service
+    ports:
+      - 9697:9697
+      - 10010:10010   
+    environment:
+      TZ: Europe/London
+      StreamApiConfig__StreamCreationStrategy: 2
+      StreamApiConfig__BrokerUrl: 'kafka:9092'
+      RdaConfig__PulFilesSearchPaths__0: '/tdrive/PUL Files'
+      EssentialsConfig__CfgDirectoryPaths__0: '/tdrive/Config'
+      EssentialsConfig__PgvDirectoryPaths__0: '/tdrive/PGVs'
+      EssentialsConfig__RemoteConfigIndexerUrl: 'http://config-indexer-service:5050'
+      BridgeConfig__DataSource: 'ADSTest01'
+    volumes:
+      - t_drive:/tdrive
+
+  virtual-parameter-service:
+    image: atlasplatformdocker/virtual-parameter-service-host-dev:2.1.3.3
+    ports:
+      - 10011:10010
+    networks:
+      - stream_net
+    deploy:
+      placement:
+        constraints:
+          - node.labels.role == bridge-service
+    environment:
+      StreamApiConfig__StreamCreationStrategy: 2
+      StreamApiConfig__BrokerUrl: 'kafka:9092'
+      VirtualParameterServiceConfig__DataSource: 'ADSTest01'
+      SessionTypesToProcess__0: 'Session'
+      SessiopnTypesToProcess__1: 'VTS'
+      StreamApiConfig__Security__Protocol: 'PLAINTEXT'
+      LOG_FILE_PATH: '/logs/vps-svc-log.txt'
+
+  gateway-service:
+    image: atlasplatformdocker/gateway-service-host-dev:0.0.0.58-ci
+    ports:
+      - 5200:5200   
+    networks:
+      - stream_net
+    deploy:
+      placement:
+        constraints:
+          - node.labels.role == services
+    environment:
+      TZ: Europe/London
+      StreamApiConfig__StreamCreationStrategy: 2
+      StreamApiConfig__BrokerUrl: 'kafka:9092'
+      Kestrel__Endpoints__Grpc__Url: 'http://+:5200'
+
+  swagger-ui-file-indexer:
+    image: swaggerapi/swagger-ui:latest
+    container_name: swagger-ui-file-indexer
+    ports:
+      - 5010:8080
+    environment:
+      # Path inside the container to the mounted OpenAPI/Swagger file
+      URL: 'http://10.102.40.39:5000/swagger/v1/swagger.json'
+    restart: unless-stopped
+    depends_on:
+      - file-indexer-service
+    networks:
+      - stream_net
+    deploy:
+      placement:
+        constraints:
+          - node.labels.role == services
+
+  mongodb:
+    image: mongodb/mongodb-community-server:latest
+    container_name: mongodb
+    ports:
+      - 27017:27017
+    volumes:
+      - mongo_db_data:/data/db
+    networks:
+      - stream_net
+    deploy:
+      placement:
+        constraints:
+          - node.labels.role == services
+
+  swagger-ui-config-indexer:
+    image: swaggerapi/swagger-ui:latest
+    container_name: swagger-ui-config-indexer
+    ports:
+      - 5020:8080
+    depends_on:
+      - config-indexer-service
+    environment:
+      # Path inside the container to the mounted OpenAPI/Swagger file
+      URL: 'http://10.102.40.39:5050/swagger/v1/swagger.json'
+    restart: unless-stopped
+    networks:
+      - stream_net
+    deploy:
+      placement:
+        constraints:
+          - node.labels.role == services
+
+  file-indexer-service:
+    container_name: file-indexer-service
+    image: atlasplatformdocker/file-indexing-service-dev:2.1.2.5
+    ports:
+      - 5000:5000
+    volumes:
+      - t_drive:/tdrive
+    environment:
+      MongoDb__ConnectionString: 'mongodb://mongodb:27017'
+      MongoDb__DataBaseName: 'FileIndexDB'
+      MongoDb__CollectionName: 'IndexedFiles'
+      ASPNETCORE_URLS: 'http://*:5000'
+      StorageType: 'MongoDb'
+      Directories__0: '/tdrive/PGVs'
+      Directories__1: '/tdrive/Config'
+      Directories__2: '/tdrive/PUL Files'
+      Extensions__0: '.pgv'
+      Extensions__1: '.cfg'
+      Extensions__2: '.pul'
+    depends_on:
+      - mongodb
+    networks:
+      - stream_net
+    deploy:
+      placement:
+        constraints:
+          - node.labels.role == services
+
+  config-indexer-service:
+    container_name: config-indexer-service
+    image: atlasplatformdocker/config-indexing-service-dev:2.1.2.5
+    ports:
+      - 5050:5050
+    volumes:
+      - t_drive:/tdrive
+    depends_on:
+      - mongodb
+      - file-indexer-service
+    environment:
+      MongoDb__ConnectionString: 'mongodb://mongodb:27017'
+      StorageType: 'MongoDb'
+      FileIndexerEndpoints__CfgEndpoint: 'http://file-indexer-service:5000'
+      FileIndexerEndpoints__PgvEndpoint: 'http://file-indexer-service:5000'
+      ASPNETCORE_URLS: 'http://*:5050'
+    networks:
+      - stream_net
+    deploy:
+      placement:
+        constraints:
+          - node.labels.role == services
+
+networks:
+  stream_net:
+    driver: overlay
+
+volumes:
+  t_drive:
+    driver: local
+    driver_opts:
+      type: cifs
+      o: username=ocs.autotest@applied.com,password=R#5tQ#Lzp@D9$$&SKMp74,vers=3.0
+      device: "//vmmcafilappp01.applied.com/Files"
+  mongo_db_data:

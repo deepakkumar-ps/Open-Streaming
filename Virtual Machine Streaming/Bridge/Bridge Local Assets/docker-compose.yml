@@ -1,0 +1,50 @@
+# =============================================================================
+#  BRIDGE STACK  ->  runs ONLY on the node labelled  role=bridge
+#  Deploy with:  docker stack deploy -c docker-compose.bridge.yml bridge
+#
+#  NOTE: the two bind-mount folders below must EXIST on the BRIDGE machine.
+#        Copy your config there first, e.g.:
+#           sudo mkdir -p /opt/bridge/MSOConfigs_P /opt/bridge/EssentialFiles
+#           (then copy MSOConfigs_P/* and the Essentials into those folders)
+#
+#  NOTE: inside the Bridge config, point the Kafka bootstrap server at
+#        "kafka:9092"  -- it resolves across machines over the overlay network.
+# =============================================================================
+
+networks:
+  shared_network:
+    external: true
+
+services:
+  bridge-service:
+    image: atlasplatformdocker/bridge-service-host-dev:2.1.4.35-dev
+    ports:
+      # Published through the Swarm routing mesh -> reachable from the Windows
+      # machine at  <BRIDGE-node-IP>:9697  and  <BRIDGE-node-IP>:10010
+      - "9697:9697"
+      - "10010:10010"
+    environment:
+      TZ: Europe/London
+      # --- .NET GC tuning for containers ---
+      DOTNET_GCHeapHardLimit: "0xC0000000" # 3 GB ceiling
+      DOTNET_gcServer: "1"
+      DOTNET_gcConcurrent: "1"
+      DOTNET_GCConserveMemory: "5"
+    networks:
+      - shared_network
+    volumes:
+      - /home/ocsautotest/docker-composes/BridgeService/Configs:/app/Configs # absolute path on the BRIDGE machine
+      - /home/ocsautotest/docker-composes/BridgeService/EssentialFiles:/app/Essentials # absolute path on the BRIDGE machine
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.labels.role == bridge # <-- THIS pins Bridge to the Bridge machine
+      resources:
+        limits:
+          cpus: "4"
+          memory: 4G
+        reservations:
+          memory: 1G
+      restart_policy:
+        condition: on-failure

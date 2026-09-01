@@ -1,0 +1,1 @@
+Bridge Network drive assets will use the pgvs and dtvs from the t drive 

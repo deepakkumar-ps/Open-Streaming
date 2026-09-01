@@ -1,0 +1,1 @@
+Bidge local assets will use the local pgvs and dtvs only

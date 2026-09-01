@@ -1,1 +1,2 @@
-Hello workd
+Bridge local assets is where the deployed bridge will access the pgvs and dtvs from that machine locally 
+Bridge Netwrok drive assets folder is the bridge where it will access the pgvs and dtvs from network drive
