@@ -1,0 +1,104 @@
+# =============================================================================
+#  LOCAL PRE-FLIGHT  —  plain `docker compose`, single node, laptop only
+# =============================================================================
+#  Identical broker security config to docker-compose.kafka-secure.yml, but with
+#  a RELATIVE secrets bind mount and no Swarm placement constraints, so it runs
+#  on a laptop. Use it to prove the config is sound before touching the Swarm.
+#
+#    ./generate-certs.sh
+#    docker compose -f docker-compose.local-preflight.yml up -d
+#    docker compose -f docker-compose.local-preflight.yml logs -f kafka
+#
+#  Then run ./verify-listeners.sh to exercise every secured listener.
+# =============================================================================
+
+services:
+  kafka:
+    image: apache/kafka:latest
+    hostname: kafka
+    container_name: kafka-preflight
+    ports:
+      - "9092:9092"
+      - "8080:8080"
+    environment:
+      CLUSTER_ID: "local"
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: "broker,controller"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
+
+      # --- Listeners -----------------------------------------------------------
+      # 9092 PLAINTEXT   existing/production path + inter-broker. UNCHANGED.
+      # 9093 CONTROLLER  KRaft controller, internal only.
+      # 9095 SASLPLAIN   scenario 1: SASL/PLAIN, no TLS
+      # 9096 SASLSSL     scenario 2: SASL/PLAIN over TLS, no client cert
+      # 9097 MTLS        scenario 3: TLS + mandatory client cert, no SASL
+      # 9098 SASLMTLS    scenario 4: SASL/PLAIN over TLS + mandatory client cert
+      # 9099 SCRAMMTLS   scenario 5: SASL/SCRAM-SHA-256 over TLS + client cert
+      #
+      # Listener names deliberately contain NO underscores: per-listener config
+      # keys arrive as env vars (KAFKA_LISTENER_NAME_<NAME>_...) where "_" maps
+      # to ".", so an underscore in the name would corrupt the property key.
+      KAFKA_LISTENERS: "PLAINTEXT://:9092,CONTROLLER://:9093,SASLPLAIN://:9095,SASLSSL://:9096,MTLS://:9097,SASLMTLS://:9098,SCRAMMTLS://:9099"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka:9092,SASLPLAIN://kafka:9095,SASLSSL://kafka:9096,MTLS://kafka:9097,SASLMTLS://kafka:9098,SCRAMMTLS://kafka:9099"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,SASLPLAIN:SASL_PLAINTEXT,SASLSSL:SASL_SSL,MTLS:SSL,SASLMTLS:SASL_SSL,SCRAMMTLS:SASL_SSL"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+
+      # --- SASL mechanisms enabled cluster-wide --------------------------------
+      KAFKA_SASL_ENABLED_MECHANISMS: "PLAIN,SCRAM-SHA-256"
+
+      # --- TLS material, shared by every TLS listener --------------------------
+      # KEYSTORE *must* use the image's FILENAME/CREDENTIALS indirection.
+      # /etc/kafka/docker/configure detects "SSL://" in KAFKA_ADVERTISED_LISTENERS
+      # and then hard-requires KAFKA_SSL_KEYSTORE_FILENAME, KAFKA_SSL_KEY_CREDENTIALS
+      # and KAFKA_SSL_KEYSTORE_CREDENTIALS. It runs under `set -u`, so supplying
+      # KAFKA_SSL_KEYSTORE_LOCATION instead makes the container die at startup with
+      #   /etc/kafka/docker/configure: line 18: !1: unbound variable
+      # (Verified against apache/kafka:latest — see SWARM_SETUP_GUIDE.md §Troubleshooting.)
+      KAFKA_SSL_KEYSTORE_FILENAME: "kafka.keystore.p12"
+      KAFKA_SSL_KEYSTORE_CREDENTIALS: "kafka_keystore_creds"
+      KAFKA_SSL_KEY_CREDENTIALS: "kafka_key_creds"
+      KAFKA_SSL_KEYSTORE_TYPE: "PKCS12"
+
+      # TRUSTSTORE, by contrast, must be set DIRECTLY. The same script only wires
+      # up the truststore indirection when the *global* ssl.client.auth is
+      # required/requested — and ours is "none", because client certs are demanded
+      # per-listener instead. Without these three the mTLS listeners have no CA to
+      # validate client certs against.
+      KAFKA_SSL_TRUSTSTORE_LOCATION: "/etc/kafka/secrets/kafka.truststore.p12"
+      KAFKA_SSL_TRUSTSTORE_PASSWORD: "changeit"
+      KAFKA_SSL_TRUSTSTORE_TYPE: "PKCS12"
+      # Global default: no client cert required. Overridden per-listener below.
+      KAFKA_SSL_CLIENT_AUTH: "none"
+
+      # --- Per-listener SASL mechanism ----------------------------------------
+      KAFKA_LISTENER_NAME_SASLPLAIN_SASL_ENABLED_MECHANISMS: "PLAIN"
+      KAFKA_LISTENER_NAME_SASLSSL_SASL_ENABLED_MECHANISMS: "PLAIN"
+      KAFKA_LISTENER_NAME_SASLMTLS_SASL_ENABLED_MECHANISMS: "PLAIN"
+      KAFKA_LISTENER_NAME_SCRAMMTLS_SASL_ENABLED_MECHANISMS: "SCRAM-SHA-256"
+
+      # --- JAAS ----------------------------------------------------------------
+      # PLAIN listeners: inline per-listener config, no file needed.
+      # SCRAM listener: Kafka demands a 'KafkaServer'/'<listener>.KafkaServer'
+      # JAAS *entry* even though SCRAM credentials live in cluster metadata, so
+      # KAFKA_OPTS below points at secrets/kafka_server_jaas.conf which supplies
+      # a scrammtls.KafkaServer entry. Verified: without it the broker exits with
+      # "Could not find a 'KafkaServer' or 'scrammtls.KafkaServer' entry".
+      KAFKA_OPTS: "-Djava.security.auth.login.config=/etc/kafka/secrets/kafka_server_jaas.conf"
+      KAFKA_LISTENER_NAME_SASLPLAIN_PLAIN_SASL_JAAS_CONFIG: 'org.apache.kafka.common.security.plain.PlainLoginModule required username="admin" password="admin-secret" user_admin="admin-secret" user_streamuser="stream-secret";'
+      KAFKA_LISTENER_NAME_SASLSSL_PLAIN_SASL_JAAS_CONFIG: 'org.apache.kafka.common.security.plain.PlainLoginModule required username="admin" password="admin-secret" user_admin="admin-secret" user_streamuser="stream-secret";'
+      KAFKA_LISTENER_NAME_SASLMTLS_PLAIN_SASL_JAAS_CONFIG: 'org.apache.kafka.common.security.plain.PlainLoginModule required username="admin" password="admin-secret" user_admin="admin-secret" user_streamuser="stream-secret";'
+
+      # --- Per-listener client-certificate requirement (mTLS) -----------------
+      KAFKA_LISTENER_NAME_MTLS_SSL_CLIENT_AUTH: "required"
+      KAFKA_LISTENER_NAME_SASLMTLS_SSL_CLIENT_AUTH: "required"
+      KAFKA_LISTENER_NAME_SCRAMMTLS_SSL_CLIENT_AUTH: "required"
+
+      # --- Single-node sizing --------------------------------------------------
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_LOG_DIRS: "/tmp/kraft-kafka-logs"
+    volumes:
+      - ./secrets:/etc/kafka/secrets:ro
