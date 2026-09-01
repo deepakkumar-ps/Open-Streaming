@@ -1,0 +1,9 @@
+{
+    "compression.type": "zstd",
+    "linger.ms": "100",
+    "batch.size": "4194304",
+    "queue.buffering.max.messages": "2000000",
+    "queue.buffering.max.kbytes": "2097152",
+    "message.max.bytes": "4194304",
+    "message.timeout.ms": "600000"
+}

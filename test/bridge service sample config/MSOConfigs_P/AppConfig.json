@@ -1,0 +1,76 @@
+{
+  "StreamApiConfig": {
+    "StreamCreationStrategy": 1,
+    "BrokerUrl": "kafka:9092",
+    "PartitionMappings": [
+      {
+        "Stream": "Live",
+        "Partition": 1
+      },
+      {
+        "Stream": "Offload",
+        "Partition": 2
+      }
+    ],
+    "IntegrateSessionManagement": true,
+    "IntegrateDataFormatManagement": true,
+    "UseRemoteKeyGenerator": false,
+    "RemoteKeyGeneratorServiceAddress": "",
+    "BatchingResponses": false,
+    "InitialisationTimeoutSeconds": 1,
+    "Domain": "Test3",
+    "Security": {
+      "SaslUsername": "streamuser",
+      "SaslPassword": "stream-secret",
+      "Protocol": "SaslPlaintext",
+      "Mechanism": "Plain"
+    },
+    "KafkaBrokerPublishingConfigFileName": "Configs/kafka-publisher-broker.json",
+    "EnableRouterPublishMetrics": true,
+    "EnableRouterConsumeMetrics": true
+  },
+  "StreamSelectionConfig": {
+    "Auto": false,
+    "Mappings": [
+      {
+        "AppName": "*",
+        "Stream": "Live"
+      }
+    ]
+  },
+  "BridgeConfig": {
+    "DataSource": "Default",
+    "UseStringIdentifier": true,
+    "ProcessFlow": "DropOldest",
+    "LiveConcurrencyFactor": 12,
+    "OffloadConcurrencyFactor": 24,
+    "OffloadProcessing": true,
+    "OffloadStream": "Offload"
+  },
+  "EssentialsConfig": {
+    "CfgDirectoryPaths": [
+      "Essentials"
+    ],
+    "PgvDirectoryPaths": [
+      "Essentials"
+    ]
+  },
+  "RdaConfig": {
+    "PulFilesSearchPaths": [
+      "Essentials"
+    ]
+  },
+  "Serilog": {
+    "MinimumLevel": {
+      "Default": "Debug"
+    },
+    "WriteTo": [
+      {
+        "Name": "Console",
+        "Args": {
+          "outputTemplate": "[{Timestamp:HH:mm:ss} {Level:u3}] {Message:lj}{NewLine}{Exception}"
+        }
+      }
+    ]
+  }
+}
