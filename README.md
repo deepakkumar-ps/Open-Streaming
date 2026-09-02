@@ -9,8 +9,6 @@ Docker Swarm stacks for the Bridge Service and Kafka, together with reference
 configurations for every Kafka security posture the project supports. It is a
 navigation hub: each folder below carries its own setup instructions.
 
-![Image showing the repository structure](Structure.jpg)
-
 ---
 
 ## Repository Structure
