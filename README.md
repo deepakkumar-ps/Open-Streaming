@@ -4,8 +4,6 @@ This repository includes comprehensive setup configurations for Kafka with vario
 
 ## Table of Contents
 
-   ![Image showing the repository structure](Structure.jpg)
-
 - [Quick Start](#quick-start)
 - [Available Security Configurations](#available-security-configurations)
 - [Setup Guides](#setup-guides)
@@ -15,6 +13,10 @@ This repository includes comprehensive setup configurations for Kafka with vario
 ---
 
 ## Quick Start
+
+This image shows the structure of this repository:
+
+   ![Image showing the repository structure](Structure.jpg)
 
 Each security configuration is located in its own directory under the `test/` folder. To get started:
 
