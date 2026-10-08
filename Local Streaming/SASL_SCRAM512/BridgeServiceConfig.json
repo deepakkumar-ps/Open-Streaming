@@ -1,0 +1,50 @@
+{
+  "StreamApiConfig": {
+    "StreamCreationStrategy": 2,
+    "BrokerUrl": "localhost:9094",
+    "IntegrateSessionManagement": true,
+    "IntegrateDataFormatManagement": true,
+    "UseRemoteKeyGenerator": false,
+    "RemoteKeyGeneratorServiceAddress": "",
+    "BatchingResponses": false,
+    "InitialisationTimeoutSeconds": 1,
+    "Domain": "Testing",
+    "Security": {
+    "Protocol": "SaslPlaintext",
+    "Mechanism": "ScramSha512",
+    "SaslUsername": "streamuser",
+    "SaslPassword": "stream-secret"
+    }
+  },
+  "StreamSelectionConfig": {
+    "Auto": false,
+    "Mappings": [
+      {
+        "AppName": "*",
+        "Stream": "Live"
+      }
+    ]
+  },
+  "BridgeConfig": {
+    "DataSource": "Default",
+    "UseStringIdentifier": true,
+    "ProcessFlow": "DropOldest",
+    "LiveConcurrencyFactor": 12,
+    "OffloadConcurrencyFactor": 24,
+    "OffloadProcessing": true,
+    "OffloadStream": "Offload"
+  },
+  "Serilog": {
+    "MinimumLevel": {
+      "Default": "Information"
+    },
+    "WriteTo": [
+      {
+        "Name": "Console",
+        "Args": {
+          "outputTemplate": "[{Timestamp:HH:mm:ss} {Level:u3}] {SourceContext}: {Message:lj}{NewLine}{Exception}"
+        }
+      }
+    ]
+  }
+}
