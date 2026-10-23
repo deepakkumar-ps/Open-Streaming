@@ -27,17 +27,27 @@ Pick one variant per deployment — they are alternatives, not layers.
 
 ### [Unified Broker](Unified%20Broker/)
 
-A centralized Kafka broker example, plus the supporting Open Streaming configuration
-files that go with it. A single Kafka stack exposes every supported security posture on
-its own port simultaneously, so the broker is deployed **once** and a client moves
-between postures by changing only its own configuration.
+A centralized Kafka broker on its own VM, plus a Bridge stack on a second VM. One Kafka
+stack exposes every supported security posture at the same time, each on its own port:
 
-The existing plaintext listener stays untouched while the secured listeners are added
-alongside it, which makes this the low-risk path for migrating a running system.
+| Port | Posture |
+|---|---|
+| 9094 | Plaintext |
+| 9095 | SASL/PLAIN |
+| 9096 | SASL/PLAIN over TLS |
+| 9097 | mTLS |
+| 9098 | SASL/PLAIN + mTLS |
+| 9099 | SCRAM-SHA-256 + mTLS |
 
-Detailed setup instructions — certificate generation, staging certificates across
-nodes, stack deployment, per-posture client configuration and rollback — live inside
-that folder's README.
+All of these are published and advertised on the Kafka VM's IP. The broker is deployed
+**once**, and a client moves between postures by changing only its own configuration.
+
+The Bridge Service runs in Docker on the Bridge VM. ADS sends the raw feed to it on
+port `9697` (the ADS **Remote data feed endpoint** setting), and the Bridge publishes to
+Kafka on the chosen secured port.
+
+That folder's README covers the full setup: certificates, staging, both stack
+deployments, ADS and ATLAS configuration, switching posture, and rollback.
 
 ### [Fragmented Broker](Fragmented%20Broker/)
 

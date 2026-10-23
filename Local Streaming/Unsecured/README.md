@@ -55,7 +55,7 @@ http://localhost:8080
 The local Bridge Service reads `Bridgeconfig.json`. Key settings:
 
 - **`BrokerUrl`: `localhost:9094`** — the Bridge connects to Kafka's external listener.
-- **`Domain`: `Test123`** — this must **match** the domain configured in the ATLAS Stream Recorder.
+- **`Domain`: `Testing`** — this must **match** the domain configured in the ATLAS Stream Recorder.
 - **`StreamCreationStrategy`: `1`** — must be the **same** on both the Bridge and ATLAS side.
 - **`PartitionMappings`** — maps streams to Kafka partitions:
   - `Live` → partition `1`

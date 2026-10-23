@@ -71,10 +71,11 @@ sudo mkdir -p /home/ocsautotest/docker-composes/BridgeService/Configs \
 
 Then copy the configuration into `Configs/` and the assets into `EssentialFiles/`.
 
-> The comment block at the top of `docker-compose.yml` refers to `/opt/bridge/...` and
-> to a file named `docker-compose.bridge.yml`. The paths the file actually mounts are
-> the ones in the table above, and the file is named `docker-compose.yml` — follow the
-> table and the command below.
+Because `/app/Configs` is mounted, the Bridge reads `/app/Configs/AppConfig.json` from
+the host folder. On Linux there is no ATLAS 9 fallback, so `EssentialsConfig` in that
+file **must** set `CfgDirectoryPaths` and `PgvDirectoryPaths` to paths inside the
+container (for example under `/app/Essentials`). Otherwise the Bridge stops at startup
+with `DirectoryPaths needs to be specified in EssentialsConfig`.
 
 A reference `AppConfig.json` is available under
 [Fragmented Broker/bridge service sample config](../../Fragmented%20Broker/bridge%20service%20sample%20config/).
@@ -88,6 +89,14 @@ docker stack deploy -c docker-compose.yml bridge
 docker service ls
 docker service logs -f bridge_bridge-service
 ```
+
+---
+
+## Point ADS at the Bridge
+
+On the ADS machine, open **Tools → Options → Recording** and set **Enable remote data
+feed** to `TRUE` and **Remote data feed endpoint** to `<bridge-node-IP>:9697`. Then
+restart ADS.
 
 ---
 

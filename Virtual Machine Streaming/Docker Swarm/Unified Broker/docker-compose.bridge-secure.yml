@@ -1,40 +1,19 @@
-# =============================================================================
-#  BRIDGE STACK — with Kafka security enabled
-#  Runs ONLY on the node labelled  role=bridge
-#
-#    docker stack deploy -c docker-compose.bridge-secure.yml bridge
-#
-#  Identical to your existing bridge stack except:
-#    1. The THREE Kafka clients (bridge-service, virtual-parameter-service,
-#       gateway-service) point at a secured listener and carry a Security block.
-#    2. Those three mount the CA certificate.
-#
-#  Currently configured for  SCENARIO 2: SASL_SSL + PLAIN, no client cert
-#  (kafka:9096). To switch scenario, change BrokerUrl + the Security__* block —
-#  see the table in SWARM_SETUP_GUIDE.md §5. Services that don't talk to Kafka
-#  (mongodb, file-indexer, config-indexer) are unchanged.
-#
-#  >>> BEFORE DEPLOYING <<<
-#  a) Stage the CA cert on the BRIDGE node:
-#       scp -r secrets ocsautotest@<bridge-node>:/home/ocsautotest/docker-composes/Bridge/
-#  b) Restore your real CIFS credentials in the t_drive volume at the bottom —
-#     they are placeholdered here so this file is safe to share/commit.
-# =============================================================================
-
 networks:
   shared_network:
     external: true
 
 services:
-
   bridge-service:
-    image: atlasplatformdocker/bridge-service-host-dev:2.1.5.3
+    image: atlasplatformdocker/bridge-service-host-dev:2.1.5.19-ci
     networks:
       - shared_network
     deploy:
+      replicas: 1
       placement:
         constraints:
           - node.labels.role == bridge
+      restart_policy:
+        condition: on-failure
     ports:
       - "9697:9697"
       - "10010:10010"
@@ -42,17 +21,13 @@ services:
       TZ: Europe/London
 
       StreamApiConfig__StreamCreationStrategy: 2
-      StreamApiConfig__Domain: "VitualTest"
-
-      # ---- KAFKA SECURITY -----------------------------------------------------
-      # Scenario 2: SASL_SSL + PLAIN, broker-verification-only TLS.
-      StreamApiConfig__BrokerUrl: "kafka:9096"
+      StreamApiConfig__Domain: "Testing"
+      StreamApiConfig__BrokerUrl: "10.104.10.89:9096"
       StreamApiConfig__Security__Protocol: "SaslSsl"
       StreamApiConfig__Security__Mechanism: "Plain"
       StreamApiConfig__Security__SaslUsername: "streamuser"
       StreamApiConfig__Security__SaslPassword: "stream-secret"
       StreamApiConfig__Security__SslCaLocation: "/etc/kafka/secrets/ca.crt"
-      # -------------------------------------------------------------------------
 
       BridgeConfig__DataSource: "Default"
       BridgeConfig__LiveConcurrencyFactor: 1
@@ -74,29 +49,27 @@ services:
     networks:
       - shared_network
     deploy:
+      replicas: 1
       placement:
         constraints:
           - node.labels.role == bridge
+      restart_policy:
+        condition: on-failure
     ports:
       - "10011:10010"
     environment:
-      StreamApiConfig__StreamCreationStrategy: 2
       VirtualParameterServiceConfig__DataSource: "Default"
-
       SessionTypesToProcess__0: "Session"
       SessionTypesToProcess__1: "VTS"
 
-      # ---- KAFKA SECURITY -----------------------------------------------------
-      # NOTE: this service previously had Protocol: "PLAINTEXT" (upper case).
-      # The documented value is "SaslSsl"/"Plaintext" style — matching the docs'
-      # casing here removes any doubt about enum parsing.
-      StreamApiConfig__BrokerUrl: "kafka:9096"
+      StreamApiConfig__StreamCreationStrategy: 2
+      StreamApiConfig__Domain: "Testing"
+      StreamApiConfig__BrokerUrl: "10.104.10.89:9096"
       StreamApiConfig__Security__Protocol: "SaslSsl"
       StreamApiConfig__Security__Mechanism: "Plain"
       StreamApiConfig__Security__SaslUsername: "streamuser"
       StreamApiConfig__Security__SaslPassword: "stream-secret"
       StreamApiConfig__Security__SslCaLocation: "/etc/kafka/secrets/ca.crt"
-      # -------------------------------------------------------------------------
     volumes:
       - /home/ocsautotest/docker-composes/Bridge/secrets:/etc/kafka/secrets:ro
 
@@ -105,38 +78,39 @@ services:
     networks:
       - shared_network
     deploy:
+      replicas: 1
       placement:
         constraints:
           - node.labels.role == bridge
+      restart_policy:
+        condition: on-failure
     ports:
       - "5200:5200"
     environment:
-      StreamApiConfig__StreamCreationStrategy: 2
       Kestrel__Endpoints__Grpc__Url: "http://+:5200"
 
-      # ---- KAFKA SECURITY -----------------------------------------------------
-      StreamApiConfig__BrokerUrl: "kafka:9096"
+      StreamApiConfig__StreamCreationStrategy: 2
+      StreamApiConfig__Domain: "Testing"
+      StreamApiConfig__BrokerUrl: "10.104.10.89:9096"
       StreamApiConfig__Security__Protocol: "SaslSsl"
       StreamApiConfig__Security__Mechanism: "Plain"
       StreamApiConfig__Security__SaslUsername: "streamuser"
       StreamApiConfig__Security__SaslPassword: "stream-secret"
       StreamApiConfig__Security__SslCaLocation: "/etc/kafka/secrets/ca.crt"
-      # -------------------------------------------------------------------------
     volumes:
       - /home/ocsautotest/docker-composes/Bridge/secrets:/etc/kafka/secrets:ro
-
-  # ---------------------------------------------------------------------------
-  # Below: no Kafka connection, unchanged from your existing stack.
-  # ---------------------------------------------------------------------------
 
   mongodb:
     image: mongodb/mongodb-community-server:latest
     networks:
       - shared_network
     deploy:
+      replicas: 1
       placement:
         constraints:
           - node.labels.role == bridge
+      restart_policy:
+        condition: on-failure
     ports:
       - "27017:27017"
     volumes:
@@ -147,9 +121,12 @@ services:
     networks:
       - shared_network
     deploy:
+      replicas: 1
       placement:
         constraints:
           - node.labels.role == bridge
+      restart_policy:
+        condition: on-failure
     ports:
       - "5000:5000"
     volumes:
@@ -174,9 +151,12 @@ services:
     networks:
       - shared_network
     deploy:
+      replicas: 1
       placement:
         constraints:
           - node.labels.role == bridge
+      restart_policy:
+        condition: on-failure
     ports:
       - "5050:5050"
     volumes:
@@ -193,10 +173,7 @@ volumes:
     driver: local
     driver_opts:
       type: cifs
-      # >>> REPLACE with your real credentials from the current bridge stack. <<<
-      # Placeholdered so this file is safe to share and commit. Better still,
-      # move these to a docker secret while you're securing things.
-      o: "username=REPLACE_ME,password=REPLACE_ME,vers=3.0"
+      o: "username=${CIFS_USERNAME:?set CIFS_USERNAME},password=${CIFS_PASSWORD:?set CIFS_PASSWORD},vers=3.0"
       device: "//vmmcafilappp01.applied.com/Files"
 
   mongo_db_data:

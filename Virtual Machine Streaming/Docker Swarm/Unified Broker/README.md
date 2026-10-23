@@ -1,72 +1,137 @@
 # Unified Broker
 
-A centralized Kafka broker for Docker Swarm. One stack exposes **every supported
-security posture on its own port simultaneously**, so the broker is deployed once and a
-client moves between postures by changing only its own configuration.
+A centralized Kafka broker for Docker Swarm. One Kafka stack exposes **every supported
+security posture on its own port at the same time**, so the broker is deployed once and
+a client moves between postures by changing only its own configuration.
 
-The existing `PLAINTEXT` listeners are left byte-for-byte unchanged, so Bridge Service,
-VPS, Gateway and Kafka UI keep running against the unsecured listener while the secured
-listeners sit alongside them unused. That makes this the low-risk path for securing a
-running system: add a listener, move clients across one at a time, then retire
-plaintext.
+The Bridge Service runs as a Docker container on a **separate VM**. ADS streams raw
+telemetry to it on port `9697`, and the Bridge decodes it and publishes to Kafka on
+whichever secured port it is configured for.
 
-For the list of security postures and how this compares to the
-[Fragmented Broker](../Fragmented%20Broker/) approach, see the
-[root README](../../README.md).
+For how this compares to the [Fragmented Broker](../Fragmented%20Broker/) approach, see
+the [Virtual Machine Streaming README](../README.md).
+
+---
+
+## Architecture
+
+```
+ Windows machine                 Bridge VM (role=bridge)                Kafka VM (role=kafka, 10.104.10.89)
+┌──────────────┐  9697/TCP   ┌───────────────────────────┐  9094–9099  ┌────────────────────────────┐
+│     ADS      │───────────► │ bridge-service            │───────────► │ kafka                      │
+│ (remote data │             │ virtual-parameter-service │             │   9094 plaintext           │
+│   feed)      │             │ gateway-service           │             │   9095–9099 secured        │
+└──────────────┘             │ config/file indexers      │             │ kafka-ui  :8080            │
+                             │ mongodb                   │             └─────────────┬──────────────┘
+                             └───────────────────────────┘                           │
+                                                                                     ▼
+                                                                      ATLAS Stream Recorder
+                                                                      (10.104.10.89:<port>)
+```
+
+| Hop | From → To | Address | Configured in |
+|---|---|---|---|
+| Raw telemetry | ADS → Bridge | `<bridge-VM-IP>:9697` | ADS → Tools → Options → Recording → **Remote data feed endpoint** |
+| Engineering data | Bridge / VPS / Gateway → Kafka | `10.104.10.89:<port>` | `StreamApiConfig__BrokerUrl` in `docker-compose.bridge-secure.yml` |
+| Consumption | ATLAS → Kafka | `10.104.10.89:<port>` | ATLAS Stream Configuration dialog |
+
+### Which Bridge deployment this is
+
+Bridge Service is the same program in all three deployments. The only difference is how
+it starts, and therefore which configuration it reads:
+
+| How Bridge Service runs | Configuration it reads | Used here? |
+|---|---|---|
+| Launched by ADS | `Documents\McLaren Electronic Systems\ATLAS 9\BridgeService\BridgeServiceConfig.json` | No |
+| Standalone on Windows (`MA.DataPlatforms.Bridge.Host.exe`) | `Configs\AppConfig.json` next to the exe, or the file passed with `-c` | No |
+| **Docker** (`atlasplatformdocker/bridge-service-host`) | `/app/Configs/AppConfig.json` in the container, or the file named by `CONFIG_FILE_PATH` | **Yes** |
+
+This stack uses the **Docker** deployment. It mounts no `AppConfig.json`; every setting
+is supplied as an environment variable in `docker-compose.bridge-secure.yml`.
+Environment variables override the image's built-in `AppConfig.json`. Nested keys use
+`__`, for example `StreamApiConfig__Security__SaslUsername`.
 
 ---
 
 ## Folder Contents
 
-| Item | File | What it is and why it's here |
-|---|---|---|
-| **Kafka Unified Compose** | `docker-compose.kafka-secure.yml` | The Swarm stack definition for the Kafka broker and Kafka UI, declaring all seven listeners at once. It exists as a drop-in replacement for an existing plaintext-only `docker-compose.kafka.yml` — the two plaintext listeners are preserved exactly, so deploying it secures nothing until a client opts in. |
-| **Bridge Compose File** | `docker-compose.bridge-secure.yml` | The Swarm stack definition for the Bridge node — Bridge Service, Virtual Parameter Service and Gateway Service — each with a `Security` block. It exists so a client's posture can be changed and redeployed independently of the broker. Ships configured for SASL/PLAIN over TLS. |
-| **Certificate Generator (Linux)** | `generate-certs.sh` | Creates the example CA, the broker keystore and truststore, and the client certificates, writing them to `./secrets`. It exists because every TLS posture needs a certificate chain whose SANs cover the addresses clients actually use; generating them is a prerequisite, not a deployment step. |
-| **Certificate Generator (Windows)** | `generate-certs.ps1` | The same generator for native PowerShell, so certificates can be produced on a Windows machine without Git Bash or WSL. Output is identical to the shell version. |
-| **SCRAM User Bootstrap** | `create-scram-users.sh` | Creates the SCRAM credentials in cluster metadata. It exists only for the SCRAM posture, and only works while a plaintext listener is still available to authenticate the request that creates the first user. |
-| **Config Files** | `kafka_server_jaas.conf` | Broker JAAS configuration. Kafka requires a JAAS *entry* to exist for a SCRAM-enabled listener even though the credentials themselves live in cluster metadata; without it the broker refuses to start. It is version-controlled at the folder root because the generated `secrets/` directory is gitignored, and must be staged alongside the certificates. |
-| | `docker-compose.local-preflight.yml` | The same broker configuration expressed for plain `docker compose` on a single machine. Optional — it exists to validate a broker config change on a laptop before it reaches the Swarm. |
-| | `.gitignore` | Excludes the generated `secrets/` directory so keys and certificates are never committed. |
-| **Client screenshots** | `Port9094.png` | ATLAS Stream Configuration for the existing plaintext listener — **Enable Kafka Security** unchecked. |
-| | `Port9095.png` | Same dialog for SASL/PLAIN with no TLS — security enabled, `SASL Plaintext` + `Plain`, no SSL paths. |
-| | `Port9096.png` | Same dialog for SASL/PLAIN over TLS — `SASL SSL` + `Plain` with a CA path only, no client certificate. |
-| | `Port9097.png` | Same dialog for mTLS only — `SSL` with CA, client certificate and client key. |
-| | `Port9098.png` | Same dialog for SASL/PLAIN over TLS **plus** a client certificate — `SASL SSL` + `Plain` with all three paths. |
-| | `Port9099.png` | Same dialog for SCRAM over TLS plus a client certificate — `SASL SSL` + `SCRAM-SHA-256` with all three paths. |
-
-The six screenshots exist so the **client** side of every posture can be copied from a
-known-good example rather than inferred from the broker config. Each one is shown inline
-beside the matching YAML under
-[Switching a Client to a Secured Listener](#switching-a-client-to-a-secured-listener).
-
-> The broker configuration in `docker-compose.kafka-secure.yml` was verified end-to-end
-> on single-node Docker before being committed: all seven listeners bound, and a
-> SASL_SSL create-topic/list round-trip succeeded. Two bugs found during that check are
-> recorded under [Troubleshooting](#troubleshooting).
+| File | Purpose |
+|---|---|
+| `docker-compose.kafka-secure.yml` | Swarm stack for the **Kafka VM**: the broker with all listeners, plus Kafka UI. |
+| `docker-compose.bridge-secure.yml` | Swarm stack for the **Bridge VM**: Bridge Service, Virtual Parameter Service, Gateway Service, file and config indexers, and MongoDB. Ships on posture 2 (SASL/PLAIN over TLS, port `9096`). |
+| `docker-compose.local-preflight.yml` | The same broker for plain `docker compose` on one machine, advertising `localhost`. Optional: use it to test a broker change before it reaches the Swarm. |
+| `generate-certs.sh` / `generate-certs.ps1` | Create the CA, the broker keystore and truststore, and the client certificates in `./secrets`. They also copy `kafka_server_jaas.conf` into `./secrets`. |
+| `create-scram-users.sh` | Creates the SCRAM-SHA-256 users. Needed for posture 5 only. |
+| `kafka_server_jaas.conf` | Broker JAAS entry for the SCRAM listener. Kafka will not start a SCRAM listener without it. |
+| `.gitignore` | Keeps the generated `secrets/` directory out of git. |
+| `Port9094.png` … `Port9099.png` | ATLAS Stream Configuration screenshots, one for each port. |
 
 ---
 
 ## Port Map
 
-| Port | Listener | Protocol | Mechanism | Client cert | Posture |
-|---|---|---|---|---|---|
-| 9092 | `PLAINTEXT` | PLAINTEXT | — | — | **existing / production + inter-broker** |
-| 9093 | `CONTROLLER` | PLAINTEXT | — | — | KRaft internal |
-| 9094 | `PLAINTEXT_HOST` | PLAINTEXT | — | — | **existing** external (`10.104.10.89`) |
-| 9095 | `SASLPLAIN` | SASL_PLAINTEXT | PLAIN | no | 1 |
-| 9096 | `SASLSSL` | SASL_SSL | PLAIN | no | **2 — start here** |
-| 9097 | `MTLS` | SSL | — | **required** | 3 |
-| 9098 | `SASLMTLS` | SASL_SSL | PLAIN | **required** | 4 |
-| 9099 | `SCRAMMTLS` | SASL_SSL | SCRAM-SHA-256 | **required** | 5 |
+The broker publishes ports `9094` to `9099` on the Kafka VM and advertises them as
+`10.104.10.89:<port>`. The same address therefore works for clients both inside and
+outside the Swarm.
 
-Ports 9095–9099 are **in-swarm only** (`kafka:<port>`) as shipped. Every service client
-already runs on the overlay network, so no new host ports or firewall rules are needed —
-see [Reaching the secured ports from a desktop client](#reaching-the-secured-ports-from-a-desktop-client)
-if ATLAS has to connect from outside.
+| Port | Listener | Protocol | SASL mechanism | Client cert | Posture | Reachable from |
+|---|---|---|---|---|---|---|
+| 9092 | `PLAINTEXT` | PLAINTEXT | — | — | inter-broker | overlay only (`kafka:9092`) |
+| 9093 | `CONTROLLER` | PLAINTEXT | — | — | KRaft controller | container only |
+| 9094 | `PLAINTEXT_HOST` | PLAINTEXT | — | — | unsecured | `10.104.10.89:9094` |
+| 9095 | `SASLPLAIN` | SASL_PLAINTEXT | PLAIN | no | 1 | `10.104.10.89:9095` |
+| 9096 | `SASLSSL` | SASL_SSL | PLAIN | no | **2 (default)** | `10.104.10.89:9096` |
+| 9097 | `MTLS` | SSL | — | **required** | 3 | `10.104.10.89:9097` |
+| 9098 | `SASLMTLS` | SASL_SSL | PLAIN | **required** | 4 | `10.104.10.89:9098` |
+| 9099 | `SCRAMMTLS` | SASL_SSL | SCRAM-SHA-256 | **required** | 5 | `10.104.10.89:9099` |
 
-The client configuration for each row is shown as an ATLAS Stream Configuration
-screenshot under [Switching a Client to a Secured Listener](#switching-a-client-to-a-secured-listener).
+A Kafka client uses the broker URL only for its first connection. Every later
+connection goes to the address the broker **advertises** for that listener. For that
+reason all three of the following must use the same Kafka VM address:
+
+1. `KAFKA_ADVERTISED_LISTENERS` in `docker-compose.kafka-secure.yml`
+2. The broker certificate SAN, set with `KAFKA_NODE_IP` when you run `generate-certs`
+3. `StreamApiConfig__BrokerUrl` in `docker-compose.bridge-secure.yml`, and the ATLAS
+   **Broker URL**
+
+> **If the Kafka VM is not `10.104.10.89`:** replace the address in
+> `docker-compose.kafka-secure.yml` (six advertised listeners and the `local-saslssl`
+> Kafka UI cluster) and in `docker-compose.bridge-secure.yml` (three `BrokerUrl` values).
+> Then regenerate the certificates with `KAFKA_NODE_IP=<new-ip>`.
+
+---
+
+## Prerequisites
+
+**1. Two VMs in one Docker Swarm, with labels.** Every service is pinned with a
+placement constraint. A service whose label is missing stays `Pending` and shows no
+error.
+
+```bash
+docker node update --label-add role=kafka  <kafka-node>
+docker node update --label-add role=bridge <bridge-node>
+```
+
+**2. The shared overlay network.** Both stacks declare it as `external`, so you must
+create it once, on a manager node:
+
+```bash
+docker network create --driver overlay --attachable shared_network
+```
+
+**3. Firewall.**
+
+| Open on | Port(s) | For |
+|---|---|---|
+| Kafka VM | `9094`–`9099/tcp` | Bridge, VPS, Gateway and ATLAS |
+| Kafka VM | `8080/tcp` | Kafka UI in a browser |
+| Bridge VM | `9697/tcp` | ADS remote data feed |
+| Bridge VM | `10010/tcp`, `10011/tcp`, `5200/tcp` | Bridge metrics, VPS metrics, Gateway gRPC |
+| All Swarm nodes | `2377/tcp`, `7946/tcp+udp`, `4789/udp` | Swarm management and the overlay network |
+
+**4. CIFS on the Bridge VM.** `cifs-utils` must be installed, and the VM must be able to
+reach `//vmmcafilappp01.applied.com/Files`. The Bridge, the file indexer and the config
+indexer all read PGVs, config and PUL files from that share, mounted at `/tdrive`.
 
 ---
 
@@ -74,7 +139,7 @@ screenshot under [Switching a Client to a Secured Listener](#switching-a-client-
 
 ### 1. Generate certificates (once)
 
-Run anywhere with `openssl` + `docker` — a laptop is fine.
+Run anywhere that has `openssl` and `docker`. A laptop is fine.
 
 ```bash
 ./generate-certs.sh
@@ -87,139 +152,166 @@ $env:OPENSSL_CONF = "C:\Program Files\Git\mingw64\etc\ssl\openssl.cnf"
 .\generate-certs.ps1
 ```
 
-> The `OPENSSL_CONF` line is not optional if the machine has Strawberry Perl installed —
-> PowerShell resolves its `openssl.exe` ahead of Git's, and that build looks for a
-> config file at a path that doesn't exist, failing on the very first command. Check
-> with `Get-Command openssl -All`.
+> You need the `OPENSSL_CONF` line if Strawberry Perl is installed. PowerShell finds
+> Strawberry's `openssl.exe` before Git's, and that build fails on the first command.
+> To check which one is found, run `Get-Command openssl -All`.
 
-Verify the SAN covers the Kafka node:
+Check that the SAN covers the Kafka VM:
 
 ```bash
 openssl x509 -in secrets/kafka.crt -noout -text | grep -A1 "Subject Alternative Name"
 # DNS:kafka, DNS:localhost, IP Address:127.0.0.1, IP Address:10.104.10.89
 ```
 
-If clients will reach Kafka by any other name or IP, add it before generating:
+To use a different Kafka VM IP, or extra names, set them when you generate:
 
 ```bash
-EXTRA_SANS="DNS:kafka.internal,IP:10.104.10.90" ./generate-certs.sh
+KAFKA_NODE_IP=10.104.10.90 EXTRA_SANS="DNS:kafka.internal" ./generate-certs.sh
 ```
 
-Getting this wrong is the single most likely cause of a TLS failure that looks like a
-broker fault. Never "fix" it by disabling hostname verification.
+A missing SAN entry is the most likely cause of a TLS failure that looks like a broker
+fault. Don't fix it by turning off hostname verification.
 
-### 2. Stage certificates on both nodes
+### 2. Stage certificates on both VMs
 
-Swarm does **not** copy local files to remote nodes. A relative `./secrets` bind mount
-would silently produce an empty directory inside the container.
+Swarm doesn't copy local files to remote nodes. If the absolute path is missing on the
+node, the container sees an empty directory.
 
-Copy `kafka_server_jaas.conf` into `secrets/` before staging — the broker mounts the
-whole directory at `/etc/kafka/secrets` and expects the JAAS file there.
-
-**Kafka node** (needs everything, owned by uid 1000 — same as the data dir):
+**Kafka VM:** copy the whole folder, owned by uid 1000:
 
 ```bash
 scp -r secrets ocsautotest@<kafka-node>:/home/ocsautotest/docker-composes/Kafka/
 ssh ocsautotest@<kafka-node> \
-  'sudo chown -R 1000:1000 /home/ocsautotest/docker-composes/Kafka/secrets'
+  'sudo mkdir -p /home/ocsautotest/docker-composes/Kafka/data && \
+   sudo chown -R 1000:1000 /home/ocsautotest/docker-composes/Kafka'
 ```
 
-**Bridge node** (only needs `ca.crt`, plus `client.crt`/`client.key` for the mTLS
-postures 3–5):
+**Bridge VM:** needs `ca.crt`, plus `client.crt` and `client.key` for postures 3–5:
 
 ```bash
 scp -r secrets ocsautotest@<bridge-node>:/home/ocsautotest/docker-composes/Bridge/
 ```
 
-> `docker secret` is the tidier long-term answer. Bind mounts are used here because they
-> match the pattern already in the Kafka stack, which keeps the number of new concepts
-> at zero.
+**ATLAS machine:** copy `ca.crt`, plus `client.crt` and `client.key` for postures 3–5,
+to a local folder. You will point the Stream Configuration dialog at that folder.
 
 ### 3. Deploy the Kafka stack
+
+From a manager node:
 
 ```bash
 docker stack deploy -c docker-compose.kafka-secure.yml kafka
 docker service logs -f kafka_kafka
 ```
 
-Look for seven `Awaiting socket connections on 0.0.0.0:<port>` lines, then
-`Kafka Server started`.
+Wait for a `Kafka Server started` line. Then open Kafka UI at
+`http://10.104.10.89:8080`, where two clusters appear:
 
-**Nothing has broken at this point.** `PLAINTEXT:9092` and `PLAINTEXT_HOST:9094` are
-unchanged, so every existing client keeps running exactly as before.
-
-Confirm via Kafka UI at `http://<kafka-node>:8080` — two clusters now appear:
-
-- **local-plaintext** (`:9092`) — the existing view, should be Online
-- **local-saslssl** (`:9096`) — proves posture 2 works with zero application changes
-
-If `local-saslssl` is Online, the TLS and SASL plumbing is correct before any
-application service is touched.
+- **local-plaintext** (`kafka:9092`): the unauthenticated view
+- **local-saslssl** (`10.104.10.89:9096`): shows that TLS and SASL work before any
+  application is involved
 
 ### 4. Create SCRAM users (posture 5 only)
 
-Run **on the Kafka node**, after the stack is up:
+Run this **on the Kafka VM** after the stack is up:
 
 ```bash
 ./create-scram-users.sh
 ```
 
-This works because `:9092` is still unauthenticated, giving a path in to create the
-first credentials. That is precisely the chicken-and-egg problem the
-[fragmented SCRAM example](../Fragmented%20Broker/SASL%20or%20SCRAM-SHA-256%20+%20mTLS/) has
-to work around with a `kafka-init` container and `--add-scram` at format time — and that
-workaround relies on `depends_on`, which `docker stack deploy` ignores. Keeping the
-plaintext listener makes the whole problem disappear.
+This works because the internal `PLAINTEXT` listener on `kafka:9092` doesn't need
+authentication, so it can create the first SCRAM users.
+
+### 5. Deploy the Bridge stack
+
+The T-drive credentials are read from the shell environment, so they are never written
+into the file. `docker stack deploy` refuses to run if either variable is unset.
+
+```bash
+export CIFS_USERNAME='ocs.autotest@applied.com'
+export CIFS_PASSWORD='<password>'
+docker stack deploy -c docker-compose.bridge-secure.yml bridge
+docker service logs -f bridge_bridge-service
+```
+
+> The CIFS volume is created the first time a task lands on the Bridge VM. If you deploy
+> with the wrong credentials, remove the stack, run `docker volume rm bridge_t_drive`
+> on the Bridge VM, then deploy again.
+
+### 6. Point ADS at the Bridge VM
+
+On the ADS machine, open **Tools → Options → Recording** and set:
+
+| Setting | Value |
+|---|---|
+| Enable remote data feed | `TRUE` |
+| Remote data feed endpoint | `<bridge-VM-IP>:9697` (the default `[::1]:9697` means the local machine) |
+
+If ADS also has **Local Bridge Service** set to `TRUE`, set it to `FALSE`. Otherwise ADS
+starts its own Bridge locally, as well as feeding the Docker one.
+
+Restart ADS so the settings take effect.
+
+### 7. Configure ATLAS
+
+In ATLAS Stream Configuration, set **Broker URL** to `10.104.10.89:<port>` and fill in
+the security fields for that posture, as shown in the screenshots below. **Domain Name**
+and **Stream Creation Strategy** must match the Bridge stack:
+
+| Setting | Bridge stack | ATLAS |
+|---|---|---|
+| Domain | `StreamApiConfig__Domain: "Testing"` | Domain Name: `Testing` |
+| Strategy | `StreamApiConfig__StreamCreationStrategy: 2` | Stream Creation Strategy: `TopicBased` |
+
+A mismatch here produces no error. The client connects without problems and receives no
+data.
 
 ---
 
-## Switching a Client to a Secured Listener
+## Switching Posture
 
-Edit `docker-compose.bridge-secure.yml` and redeploy:
+Each posture is set by `BrokerUrl` and the `Security__*` block. Change the block on all
+three Kafka clients (`bridge-service`, `virtual-parameter-service`, `gateway-service`)
+in `docker-compose.bridge-secure.yml`, then redeploy:
 
 ```bash
 docker stack deploy -c docker-compose.bridge-secure.yml bridge
 ```
 
-It ships configured for **posture 2**. To change posture, set `BrokerUrl` and the
-`Security__*` block on each of the three Kafka clients.
+The broker needs no change. All listeners are always running.
 
-Each posture below shows both sides of the same change: the **YAML** for the Swarm
-services, and the **ATLAS Stream Configuration** dialog for a desktop client. The
-screenshots come from a working session, so they double as a reference for which fields
-matter and which stay empty.
+Certificate paths in the YAML are paths **inside the container**
+(`/etc/kafka/secrets/...`). In ATLAS, they are local Windows paths.
 
-> In every screenshot, **Domain Name** and **Stream Creation Strategy** must match the
-> publishing Bridge Service. They are unrelated to security, but a mismatch there looks
-> exactly like a connection problem: the client connects cleanly and then sees no data.
+### Unsecured — port 9094
 
-### Baseline — existing plaintext listener, no security
+```yaml
+StreamApiConfig__BrokerUrl: "10.104.10.89:9094"
+```
 
-Nothing to configure beyond the broker address. **Enable Kafka Security** stays
-unchecked, which is how every client runs before and during the migration.
+Remove every `StreamApiConfig__Security__*` line. In ATLAS, leave **Enable Kafka
+Security** unchecked.
 
 ![ATLAS Stream Configuration against the plaintext listener on port 9094, with Enable Kafka Security unchecked](Port9094.png)
 
-Ticking that checkbox reveals the Security Protocol, Mechanism, SASL and SSL fields used
-by all five postures below.
+### Posture 1 — SASL/PLAIN, no TLS — port 9095
 
-### Posture 1 — SASL/PLAIN, no TLS
 ```yaml
-StreamApiConfig__BrokerUrl: "kafka:9095"
+StreamApiConfig__BrokerUrl: "10.104.10.89:9095"
 StreamApiConfig__Security__Protocol: "SaslPlaintext"
 StreamApiConfig__Security__Mechanism: "Plain"
 StreamApiConfig__Security__SaslUsername: "streamuser"
 StreamApiConfig__Security__SaslPassword: "stream-secret"
 ```
 
-Username and password only — all three SSL path fields stay empty, since there is no
-TLS on this listener.
+Only username and password. All SSL fields stay empty.
 
 ![ATLAS Stream Configuration for port 9095 — SASL Plaintext with the Plain mechanism, username and password set, SSL fields empty](Port9095.png)
 
-### Posture 2 — SASL/PLAIN over TLS, no client cert *(default)*
+### Posture 2 — SASL/PLAIN over TLS — port 9096 *(default)*
+
 ```yaml
-StreamApiConfig__BrokerUrl: "kafka:9096"
+StreamApiConfig__BrokerUrl: "10.104.10.89:9096"
 StreamApiConfig__Security__Protocol: "SaslSsl"
 StreamApiConfig__Security__Mechanism: "Plain"
 StreamApiConfig__Security__SaslUsername: "streamuser"
@@ -227,32 +319,31 @@ StreamApiConfig__Security__SaslPassword: "stream-secret"
 StreamApiConfig__Security__SslCaLocation: "/etc/kafka/secrets/ca.crt"
 ```
 
-Same credentials as posture 1 plus **SSL CA Location**. The certificate and key fields
-stay empty — this listener verifies the broker to the client, not the other way round.
+Credentials plus the CA. The client verifies the broker, but presents no certificate of
+its own.
 
 ![ATLAS Stream Configuration for port 9096 — SASL SSL with the Plain mechanism and only the SSL CA Location set](Port9096.png)
 
-### Posture 3 — mTLS only, no SASL
+### Posture 3 — mTLS only — port 9097
+
 ```yaml
-StreamApiConfig__BrokerUrl: "kafka:9097"
+StreamApiConfig__BrokerUrl: "10.104.10.89:9097"
 StreamApiConfig__Security__Protocol: "Ssl"
 StreamApiConfig__Security__SslCaLocation: "/etc/kafka/secrets/ca.crt"
 StreamApiConfig__Security__SslCertificateLocation: "/etc/kafka/secrets/client.crt"
 StreamApiConfig__Security__SslKeyLocation: "/etc/kafka/secrets/client.key"
 ```
 
-All three certificate paths are required; identity comes from the certificate subject.
+No username or password. The client certificate is the identity.
 
 ![ATLAS Stream Configuration for port 9097 — SSL protocol with CA, client certificate and client key paths set](Port9097.png)
 
-> The dialog still shows a Mechanism, username and password in this screenshot. With
-> **Security Protocol** set to `SSL` they are ignored — authentication is the client
-> certificate alone. Leaving stale values there is harmless but misleading; the YAML
-> above omits them deliberately.
+> With **Security Protocol** set to `SSL`, ATLAS ignores the Mechanism field.
 
-### Posture 4 — SASL/PLAIN over TLS + client cert
+### Posture 4 — SASL/PLAIN over TLS + client cert — port 9098
+
 ```yaml
-StreamApiConfig__BrokerUrl: "kafka:9098"
+StreamApiConfig__BrokerUrl: "10.104.10.89:9098"
 StreamApiConfig__Security__Protocol: "SaslSsl"
 StreamApiConfig__Security__Mechanism: "Plain"
 StreamApiConfig__Security__SaslUsername: "streamuser"
@@ -262,14 +353,14 @@ StreamApiConfig__Security__SslCertificateLocation: "/etc/kafka/secrets/client.cr
 StreamApiConfig__Security__SslKeyLocation: "/etc/kafka/secrets/client.key"
 ```
 
-Every field in use at once: credentials **and** all three certificate paths. Both layers
-must pass.
+The client must pass both checks: the password and the certificate.
 
 ![ATLAS Stream Configuration for port 9098 — SASL SSL with the Plain mechanism, credentials, and all three certificate paths set](Port9098.png)
 
-### Posture 5 — SASL/SCRAM-SHA-256 over TLS + client cert
+### Posture 5 — SASL/SCRAM-SHA-256 over TLS + client cert — port 9099
+
 ```yaml
-StreamApiConfig__BrokerUrl: "kafka:9099"
+StreamApiConfig__BrokerUrl: "10.104.10.89:9099"
 StreamApiConfig__Security__Protocol: "SaslSsl"
 StreamApiConfig__Security__Mechanism: "ScramSha256"
 StreamApiConfig__Security__SaslUsername: "streamuser"
@@ -279,30 +370,47 @@ StreamApiConfig__Security__SslCertificateLocation: "/etc/kafka/secrets/client.cr
 StreamApiConfig__Security__SslKeyLocation: "/etc/kafka/secrets/client.key"
 ```
 
-Identical to posture 4 apart from **Security Mechanism**, which becomes
-`SCRAM-SHA-256`. This is the only posture that needs
-[SCRAM users created first](#4-create-scram-users-posture-5-only).
+Same as posture 4 except for the mechanism. Before you use it, create the users with
+[step 4](#4-create-scram-users-posture-5-only).
 
 ![ATLAS Stream Configuration for port 9099 — SASL SSL with the SCRAM-SHA-256 mechanism, credentials, and all three certificate paths set](Port9099.png)
 
-### Reaching the secured ports from a desktop client
+### Security field reference
 
-The screenshots use `10.104.10.89:<port>`, but **the committed
-`docker-compose.kafka-secure.yml` does not support that for 9095–9099**: only `9094` is
-published to the host, and those five listeners advertise `kafka:<port>`, which a
-machine outside the overlay network cannot resolve.
+The Security fields come from the Bridge Service configuration guide. Security turns on
+only when `SaslUsername`, `SslCaLocation` or `SslCertificateLocation` is set.
 
-Reaching them from a desktop ATLAS client therefore needs two changes to the broker
-stack — publishing the host ports, and advertising the node address rather than `kafka`
-— and the certificate SANs must cover whichever address is advertised. In-swarm clients
-such as the Bridge, VPS and Gateway need none of this and work against `kafka:<port>` as
-shipped.
+| Variable | Values |
+|---|---|
+| `StreamApiConfig__Security__Protocol` | `Plaintext`, `Ssl`, `SaslPlaintext`, `SaslSsl` |
+| `StreamApiConfig__Security__Mechanism` | `Plain`, `ScramSha256`, `ScramSha512` |
+| `StreamApiConfig__Security__SaslUsername` / `SaslPassword` | SASL credentials |
+| `StreamApiConfig__Security__SslCaLocation` | CA certificate (PEM) |
+| `StreamApiConfig__Security__SslCertificateLocation` / `SslKeyLocation` | Client certificate and key (PEM), for mTLS |
+| `StreamApiConfig__Security__SslKeyPassword` | Only needed if the key is encrypted. `client.key` is not encrypted. |
 
-### Migrating one service at a time
+---
 
-For lowest risk, change **`gateway-service` first** (smallest blast radius), then
-`virtual-parameter-service`, then `bridge-service`. Any service left on `kafka:9092`
-keeps working — the listeners are independent.
+## Bridge Service Settings in This Stack
+
+| Variable | Value | Why |
+|---|---|---|
+| `StreamApiConfig__StreamCreationStrategy` | `2` (TopicBased) | Recommended. Each stream gets its own topic, `Testing.Data.<StreamName>`. Must match ATLAS. |
+| `StreamApiConfig__Domain` | `Testing` | Topic prefix. Set to the same value on the Bridge, VPS, Gateway and ATLAS. |
+| `BridgeConfig__DataSource` / `VirtualParameterServiceConfig__DataSource` | `Default` | Must be equal so that VPS reads the Bridge's output. |
+| `EssentialsConfig__CfgDirectoryPaths__0` / `PgvDirectoryPaths__0` | `/tdrive/Config`, `/tdrive/PGVs` | **Required in Docker.** Linux has no ATLAS 9 fallback, so the Bridge stops at startup if these are empty. |
+| `EssentialsConfig__RemoteConfigIndexerUrl` | `http://config-indexer-service:5050` | The Configs service (port 5050), not the Files service (port 5000). The paths it returns exist in the Bridge container because both mount `/tdrive`. |
+| `RdaConfig__PulFilesSearchPaths__0` | `/tdrive/PUL Files` | PUL files for RDA filtering. |
+| `BridgeConfig__OffloadProcessing` | `false` | Drops offloaded data, so only live telemetry is published. |
+| `TZ` | `Europe/London` | ECU timestamps are relative to local midnight, and the Bridge converts them using this timezone. |
+
+The feed port defaults to `9697` and the metrics port to `10010`. Don't set `FEED_PORT`
+or `METRIC_PORT` unless you also change the published ports.
+
+> **Partition-based publishing (strategy 1)** needs `StreamApiConfig__PartitionMappings__N__Stream`
+> / `__Partition` for every stream, matching `StreamSelectionConfig` mappings, with
+> partition 0 reserved. ATLAS must also be set to `PartitionBased`. If you set strategy
+> `1` without mappings, ATLAS receives no data.
 
 ---
 
@@ -310,106 +418,96 @@ keeps working — the listeners are independent.
 
 ```bash
 docker service ls
-docker service logs -f bridge_bridge-service | grep -iE "kafka|sasl|ssl|error"
+docker service logs bridge_bridge-service 2>&1 | grep -iE "kafka|sasl|ssl|error"
 ```
 
-Then in Kafka UI (`local-plaintext` cluster, since it sees the same data), confirm
-topics under the `VirtualTest.` prefix are still being written.
+A clean pass looks like this:
 
-**A clean pass means:** the service starts without auth errors, topics keep receiving
-data, and the broker log shows no `SSL handshake failed` or `Authentication failed`
-entries.
+- Every service shows `1/1` replicas.
+- The Bridge log has no `Authentication failed` or `SSL handshake failed` lines.
+- Once ADS replays or goes live, Kafka UI (`local-plaintext`) shows `Testing.*` topics
+  receiving messages.
+- ATLAS lists the session and parameters.
 
-### Negative tests — prove enforcement, not just acceptance
+### Negative tests
 
-A connection succeeding only proves the config is right. These prove the broker is
-actually enforcing:
+A successful connection only shows that the config is accepted. These tests show that
+the broker enforces it:
 
-| Test | Change | Expect |
+| Test | Change | Expected result |
 |---|---|---|
 | Wrong password | `SaslPassword: "wrong"` | SASL authentication failure |
-| No security block | remove `Security__*`, keep secured port | Connection refused / handshake failure |
-| Missing client cert (postures 3–5) | drop `SslCertificateLocation`/`SslKeyLocation` | TLS handshake rejected before SASL |
-| Wrong CA | point `SslCaLocation` at an unrelated cert | Client-side trust failure |
+| No security block | Remove `Security__*`, keep the secured port | Handshake failure |
+| Missing client cert (postures 3–5) | Remove `SslCertificateLocation` / `SslKeyLocation` | TLS handshake rejected |
+| Wrong CA | Point `SslCaLocation` at an unrelated cert | Client-side trust failure |
+
+---
+
+## Local Pre-flight (optional)
+
+Test a broker change on one machine before deploying it to the Swarm. This file
+advertises `localhost`, so clients must run on the same machine.
+
+```bash
+./generate-certs.sh
+docker compose -f docker-compose.local-preflight.yml up -d
+docker compose -f docker-compose.local-preflight.yml logs -f kafka
+```
+
+Then point ATLAS at `localhost:9094`–`localhost:9099`, using the same settings as the
+postures above. Kafka UI is at `http://localhost:8080`. To test posture 5, create the
+SCRAM users first:
+
+```bash
+for u in "admin admin-secret" "streamuser stream-secret"; do set -- $u
+  docker exec kafka-preflight /opt/kafka/bin/kafka-configs.sh --bootstrap-server kafka:9092 \
+    --alter --add-config "SCRAM-SHA-256=[password=$2]" --entity-type users --entity-name "$1"
+done
+```
+
+Tear down with `docker compose -f docker-compose.local-preflight.yml down`.
 
 ---
 
 ## Rollback
 
-Instant, and needs no Kafka change:
+Set the clients back to the unsecured listener. Kafka needs no change:
 
 ```yaml
-StreamApiConfig__BrokerUrl: "kafka:9092"
-# delete every StreamApiConfig__Security__* line
+StreamApiConfig__BrokerUrl: "10.104.10.89:9094"
 ```
 
-```bash
-docker stack deploy -c docker-compose.bridge-secure.yml bridge
-```
-
-Security only activates when one of `SaslUsername` / `SslCaLocation` /
-`SslCertificateLocation` is non-empty, so removing them is sufficient. The plaintext
-listener never went away.
-
-To revert the broker entirely, redeploy the original plaintext-only Kafka stack.
+Delete every `StreamApiConfig__Security__*` line, then redeploy the Bridge stack.
 
 ---
 
 ## Going to Production
 
-Once a posture is validated:
-
-1. Move **all** clients to the chosen secured listener.
-2. Change `KAFKA_INTER_BROKER_LISTENER_NAME` to that listener.
-3. Remove `PLAINTEXT` and `PLAINTEXT_HOST` from `KAFKA_LISTENERS`,
-   `KAFKA_ADVERTISED_LISTENERS` and `KAFKA_LISTENER_SECURITY_PROTOCOL_MAP`.
-4. Remove the now-unused secured listeners too — keep exactly one.
-5. Move SASL passwords and the CIFS credentials to `docker secret`.
-
-Step 3 is the only hard cutover, and by then everything else is proven.
-
-> Note for step 3: with plaintext gone you lose the unauthenticated path used by
-> `create-scram-users.sh`. Create SCRAM users **before** removing it, or plan to use
-> `--add-scram` at format time.
+1. Choose one posture and move every client to it.
+2. Remove the other secured listeners, and `PLAINTEXT_HOST`, from `KAFKA_LISTENERS`,
+   `KAFKA_ADVERTISED_LISTENERS`, `KAFKA_LISTENER_SECURITY_PROTOCOL_MAP` and the
+   published ports.
+3. Create SCRAM users **before** removing `PLAINTEXT`, if you remove it at all.
+   `create-scram-users.sh` needs that listener.
+4. Change every test password, and move SASL passwords and the CIFS credentials to
+   `docker secret`.
 
 ---
 
 ## Troubleshooting
 
-### Broker exits immediately: `configure: line 18: !1: unbound variable`
-
-The image's `/etc/kafka/docker/configure` detects `SSL://` in
-`KAFKA_ADVERTISED_LISTENERS` and then hard-requires `KAFKA_SSL_KEYSTORE_FILENAME`,
-`KAFKA_SSL_KEYSTORE_CREDENTIALS` and `KAFKA_SSL_KEY_CREDENTIALS`. It runs under `set -u`,
-so supplying `KAFKA_SSL_KEYSTORE_LOCATION` instead kills the container before Kafka
-starts.
-
-**Keystore must use FILENAME/CREDENTIALS. Truststore must be set directly** — the script
-only wires up truststore indirection when the *global* `ssl.client.auth` is
-`required`/`requested`, and ours is `none` because client certs are demanded
-per-listener. Both are already correct in the provided file.
-
-### Broker exits: `Could not find a 'KafkaServer' or 'scrammtls.KafkaServer' entry`
-
-Kafka requires a JAAS entry to exist for a SCRAM-enabled listener even though the
-credentials live in cluster metadata. Provided by `kafka_server_jaas.conf` plus the
-`KAFKA_OPTS` line. Make sure that file was included when `secrets/` was copied to the
-Kafka node.
-
-### TLS fails only from outside the swarm
-
-The broker cert SAN must include the address used. `10.104.10.89` is included by
-default; anything else needs `EXTRA_SANS` at generation time.
-
-### Client connects but no data appears
-
-Almost certainly not a security problem — check `StreamApiConfig__Domain`
-(`VirtualTest`) matches the topic prefix you're looking at in Kafka UI.
-
-### `secrets` directory empty inside the container
-
-Swarm doesn't copy local files to remote nodes. Confirm the absolute path exists **on
-the target node** and is owned by uid 1000 on the Kafka node.
+| Symptom | Cause | Fix |
+|---|---|---|
+| Broker exits with `configure: line 18: !1: unbound variable` | The image requires the keystore to be set through `KAFKA_SSL_KEYSTORE_FILENAME` / `_CREDENTIALS` / `KAFKA_SSL_KEY_CREDENTIALS`, not `KAFKA_SSL_KEYSTORE_LOCATION`. | Keep the keystore variables as they are in the file. The truststore is set directly through `KAFKA_SSL_TRUSTSTORE_LOCATION`, which is intentional. |
+| Broker exits with `Could not find a 'KafkaServer' or 'scrammtls.KafkaServer' entry` | `kafka_server_jaas.conf` is missing from `secrets/` on the Kafka VM. | Re-run `generate-certs` (it copies the file in) and stage `secrets/` again. |
+| Client connects, then fails with "connection refused" or "host not found" | The client can reach the bootstrap address but not the advertised address `10.104.10.89:<port>`. | Open the port in the firewall, or correct the advertised IP. |
+| TLS fails with a hostname or SAN error | The certificate doesn't include the address the client uses. | Regenerate with `KAFKA_NODE_IP` / `EXTRA_SANS`, then stage again on both VMs. |
+| Bridge stops with `DirectoryPaths needs to be specified in EssentialsConfig` | The CFG or PGV path is empty. | Keep both `EssentialsConfig__*DirectoryPaths__0` variables set. |
+| Bridge starts but finds no CFG or PGV files | The CIFS mount failed or is empty. | Check `docker volume inspect bridge_t_drive` on the Bridge VM, and the credentials. |
+| ADS shows no feed connection | The ADS endpoint is wrong, or port 9697 is blocked. | Set **Remote data feed endpoint** to `<bridge-VM-IP>:9697`, open the port, and restart ADS. |
+| Client connects but ATLAS shows no data | The domain or strategy doesn't match. | Use `Testing` and `TopicBased` on both sides. |
+| A service stays in `Pending` | The node label is missing. | `docker node update --label-add role=...` |
+| `secrets` directory is empty in the container | The path is missing on the target node. | Stage it at the absolute path on **that** node. |
 
 ---
 
@@ -418,10 +516,9 @@ the target node** and is owned by uid 1000 on the Kafka node.
 | Username | Password | Used by |
 |---|---|---|
 | `admin` | `admin-secret` | Kafka UI, admin tooling |
-| `streamuser` | `stream-secret` | Bridge Service, VPS, Gateway |
+| `streamuser` | `stream-secret` | Bridge Service, VPS, Gateway, ATLAS |
 
-Certificate store password: `changeit` (override with `CERT_PASSWORD=...`).
-`client.key` is unencrypted, so no `SslKeyPassword` is needed.
+The certificate store password is `changeit`; override it with `CERT_PASSWORD=...`.
+`client.key` is not encrypted.
 
-These are test credentials. Change them, and move them to `docker secret`, before any of
-this becomes permanent.
+These are test credentials. Change them before the setup becomes permanent.

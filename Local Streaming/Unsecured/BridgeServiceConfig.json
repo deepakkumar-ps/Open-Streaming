@@ -1,18 +1,7 @@
 {
   "StreamApiConfig": {
-    "StreamCreationStrategy": 1,
+    "StreamCreationStrategy": 2,
     "BrokerUrl": "localhost:9094",
-    // For mapping streams to partitions
-    "PartitionMappings": [
-      {
-        "Stream": "Live",
-        "Partition": 1
-      },
-      {
-        "Stream": "Offload",
-        "Partition": 2
-      }
-    ],
     "IntegrateSessionManagement": true,
     "IntegrateDataFormatManagement": true,
     "UseRemoteKeyGenerator": false,

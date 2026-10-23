@@ -41,8 +41,14 @@ echo
 
 echo "[1/5] Generating CA..."
 openssl genrsa -out ca.key 4096
+# State the CA extensions explicitly. Otherwise they come from the local
+# openssl.cnf, and a config without a v3_ca section yields a CA with no
+# extensions, which OpenSSL-based clients (librdkafka) reject.
 openssl req -x509 -new -nodes -key ca.key -sha256 -days "$DAYS" \
-  -subj "/CN=kafka-security-test-ca" -out ca.crt
+  -subj "/CN=kafka-security-test-ca" \
+  -addext "basicConstraints=critical,CA:TRUE" \
+  -addext "keyUsage=critical,keyCertSign,cRLSign" \
+  -out ca.crt
 
 echo "[2/5] Generating broker certificate..."
 openssl genrsa -out kafka.key 2048
@@ -65,7 +71,17 @@ echo "[4/5] Building PKCS12 truststore (CA only)..."
 # PKCS12 provider will not load as a *trusted* entry, so build the truststore
 # with keytool (run from the broker image itself) instead.
 rm -f kafka.truststore.p12
-docker run --rm -v "$OUT_DIR:/certs" --entrypoint keytool apache/kafka:latest \
+# Git Bash: give Docker Desktop a Windows path. Linux: run keytool as the
+# calling user, since the image's default uid (1000) may not be able to write
+# to a directory owned by someone else.
+if command -v cygpath >/dev/null 2>&1; then
+  DOCKER_MOUNT="$(cygpath -w "$OUT_DIR")"
+  DOCKER_USER=()
+else
+  DOCKER_MOUNT="$OUT_DIR"
+  DOCKER_USER=(--user "$(id -u):$(id -g)")
+fi
+docker run --rm "${DOCKER_USER[@]}" -v "$DOCKER_MOUNT:/certs" --entrypoint keytool apache/kafka:latest \
   -importcert -noprompt -alias kafka-security-test-ca \
   -file /certs/ca.crt \
   -keystore /certs/kafka.truststore.p12 \

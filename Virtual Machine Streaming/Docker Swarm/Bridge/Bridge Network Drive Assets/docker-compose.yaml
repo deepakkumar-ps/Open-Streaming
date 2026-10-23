@@ -87,7 +87,7 @@ services:
       StreamApiConfig__BrokerUrl: 'kafka:9092'
       VirtualParameterServiceConfig__DataSource: 'ADSTest01'
       SessionTypesToProcess__0: 'Session'
-      SessiopnTypesToProcess__1: 'VTS'
+      SessionTypesToProcess__1: 'VTS'
       StreamApiConfig__Security__Protocol: 'PLAINTEXT'
       LOG_FILE_PATH: '/logs/vps-svc-log.txt'
 
@@ -113,7 +113,6 @@ services:
     ports:
       - 5010:8080
     environment:
-      # Path inside the container to the mounted OpenAPI/Swagger file
       URL: 'http://10.102.40.39:5000/swagger/v1/swagger.json'
     restart: unless-stopped
     depends_on:
@@ -147,7 +146,6 @@ services:
     depends_on:
       - config-indexer-service
     environment:
-      # Path inside the container to the mounted OpenAPI/Swagger file
       URL: 'http://10.102.40.39:5050/swagger/v1/swagger.json'
     restart: unless-stopped
     networks:

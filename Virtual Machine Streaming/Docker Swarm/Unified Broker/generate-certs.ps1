@@ -55,10 +55,11 @@ $Sans        = if ($env:EXTRA_SANS) { "$BaseSans,$($env:EXTRA_SANS)" } else { $B
 
 $OutDir = Join-Path $PSScriptRoot "secrets"
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
-Set-Location $OutDir
-# Set-Location updates PowerShell's location (inherited by child processes like
+$OriginalDir = [Environment]::CurrentDirectory
+Push-Location $OutDir
+# Push-Location updates PowerShell's location (inherited by child processes like
 # openssl), but .NET APIs such as [System.IO.File] resolve relative paths against
-# Environment.CurrentDirectory, which does NOT follow Set-Location. Keep in sync.
+# Environment.CurrentDirectory, which does NOT follow Push-Location. Keep in sync.
 [Environment]::CurrentDirectory = $OutDir
 
 Write-Host "Broker certificate SAN: $Sans"
@@ -66,8 +67,14 @@ Write-Host ""
 
 Write-Host "[1/5] Generating CA..."
 Invoke-Checked openssl @('genrsa', '-out', 'ca.key', '4096')
+# State the CA extensions explicitly. Otherwise they come from the local
+# openssl.cnf, and a config without a v3_ca section yields a CA with no
+# extensions, which OpenSSL-based clients (librdkafka) reject.
 Invoke-Checked openssl @('req', '-x509', '-new', '-nodes', '-key', 'ca.key', '-sha256',
-                         '-days', "$Days", '-subj', '/CN=kafka-security-test-ca', '-out', 'ca.crt')
+                         '-days', "$Days", '-subj', '/CN=kafka-security-test-ca',
+                         '-addext', 'basicConstraints=critical,CA:TRUE',
+                         '-addext', 'keyUsage=critical,keyCertSign,cRLSign',
+                         '-out', 'ca.crt')
 
 Write-Host "[2/5] Generating broker certificate..."
 Invoke-Checked openssl @('genrsa', '-out', 'kafka.key', '2048')
@@ -122,6 +129,9 @@ Write-TextFile -Path 'kafka_truststore_creds' -Content $Password
 Copy-Item -Force (Join-Path $PSScriptRoot 'kafka_server_jaas.conf') (Join-Path $OutDir 'kafka_server_jaas.conf')
 
 Remove-Item -Force -ErrorAction SilentlyContinue 'kafka.csr', 'kafka.ext', 'ca.srl'
+
+Pop-Location
+[Environment]::CurrentDirectory = $OriginalDir
 
 Write-Host ""
 Write-Host "Done. Written to $OutDir (store password: $Password)"
